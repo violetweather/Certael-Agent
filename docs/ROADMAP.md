@@ -12,7 +12,9 @@ This repository remains pre-1.0 until every gate has published evidence.
 - [x] Short-lived launch-grant verification bound to Agent key and policy digest
 - [x] Fresh one-time challenge handling and chained signed report state
 - [x] TUF metadata rotation, expiration, rollback, and target verification library
-- [ ] Restricted inherited Windows named-pipe implementation
+- [x] Restricted inherited Windows anonymous-pipe implementation
+- [x] Live signed policy/grant, challenge, report, and shutdown channel loop
+- [x] Permission-checked operator trust store with overlapping/revoked keys
 - [ ] Production network launch-grant redemption and challenge transport
 - [ ] Signed immutable policy lifecycle
 - [ ] Atomic platform installer and exercised offline 2-of-3 TUF root ceremony

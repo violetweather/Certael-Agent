@@ -3,12 +3,13 @@ use certael_agent_platform::{inspect_executable, validate_game_path};
 use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
-use prost::Message;
 use rand_core::OsRng;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
+mod runtime;
+mod trust;
 mod ui;
 #[cfg(windows)]
 mod windows_launch;
@@ -32,6 +33,8 @@ enum Commands {
     Launch {
         #[arg(long)]
         game: PathBuf,
+        #[arg(long)]
+        trust_store: PathBuf,
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -43,13 +46,17 @@ fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&inspect_executable(&game)?)?
         ),
-        Some(Commands::Launch { game, args }) => launch(game, args)?,
+        Some(Commands::Launch {
+            game,
+            trust_store,
+            args,
+        }) => launch(game, trust_store, args)?,
         None => ui::run()?,
     }
     Ok(())
 }
 
-fn launch(game: PathBuf, args: Vec<String>) -> Result<()> {
+fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> {
     let game = validate_game_path(&game)?;
     let snapshot = inspect_executable(&game)?;
     let key = SigningKey::generate(&mut OsRng);
@@ -60,18 +67,24 @@ fn launch(game: PathBuf, args: Vec<String>) -> Result<()> {
         build_id: snapshot.executable_sha256.clone(),
         executable_sha256: hex_to_32(&snapshot.executable_sha256)?,
     };
+    let state = runtime::RuntimeState {
+        trust: trust::load(&trust_store)?,
+        game: game.clone(),
+        game_process_id: 0,
+        key,
+        hello,
+    };
 
     #[cfg(unix)]
-    return launch_unix(game, args, hello.encode_to_vec());
+    return launch_unix(game, args, state);
     #[cfg(not(unix))]
     {
-        windows_launch::launch(game, args, hello.encode_to_vec())
+        windows_launch::launch(game, args, state)
     }
 }
 
 #[cfg(unix)]
-fn launch_unix(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
-    use certael_agent_ipc::{write_frame, Frame, MessageType};
+fn launch_unix(game: PathBuf, args: Vec<String>, mut state: runtime::RuntimeState) -> Result<()> {
     use std::os::fd::{FromRawFd, RawFd};
     let mut fds: [RawFd; 2] = [-1, -1];
     let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
@@ -100,17 +113,16 @@ fn launch_unix(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
         .stdin(Stdio::null())
         .spawn()
         .context("failed to launch game")?;
+    state.game_process_id = child.id();
     unsafe {
         libc::close(child_fd);
     }
     let mut channel = unsafe { std::fs::File::from_raw_fd(fds[0]) };
-    write_frame(
-        &mut channel,
-        &Frame {
-            message_type: MessageType::AgentHello,
-            payload: hello,
-        },
-    )?;
+    let mut writer = channel
+        .try_clone()
+        .context("failed to clone private Agent channel")?;
+    runtime::serve(&mut channel, &mut writer, &state)?;
+    drop(writer);
     drop(channel);
     let status = child.wait()?;
     if !status.success() {

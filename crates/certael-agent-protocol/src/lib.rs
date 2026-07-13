@@ -76,6 +76,8 @@ pub struct AgentLaunchGrantClaimsV1 {
     pub expires_at_unix: i64,
     #[prost(bytes = "vec", tag = "12")]
     pub policy_digest: Vec<u8>,
+    #[prost(string, tag = "13")]
+    pub authoritative_server_id: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -100,6 +102,28 @@ pub struct SignedAgentLaunchGrantV1 {
     pub signature: Vec<u8>,
     #[prost(string, tag = "3")]
     pub key_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct AgentLaunchBundleV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub signed_policy: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signed_launch_grant: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundAgentLaunch {
+    pub session_id: String,
+    pub tenant_id: String,
+    pub game_id: String,
+    pub environment_id: String,
+    pub player_subject: String,
+    pub match_id: String,
+    pub build_id: String,
+    pub authoritative_server_id: String,
+    pub report_seconds: u32,
+    pub disconnect_grace_seconds: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -264,6 +288,64 @@ pub fn verify_launch_grant(
     Ok(claims)
 }
 
+pub fn verify_launch_bundle(
+    input: &[u8],
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+    expected_agent_public_key: &[u8; 32],
+    expected_build_id: &str,
+    current_agent_version: &str,
+) -> Result<BoundAgentLaunch, ProtocolError> {
+    let bundle: AgentLaunchBundleV1 = decode_canonical(input)?;
+    let policy_envelope: SignedAgentPolicyV1 = decode_canonical(&bundle.signed_policy)?;
+    let grant_envelope: SignedAgentLaunchGrantV1 = decode_canonical(&bundle.signed_launch_grant)?;
+    let policy = verify_policy(&policy_envelope, keys, now_unix)?;
+    let grant = verify_launch_grant(&grant_envelope, keys, now_unix)?;
+    let minimum = semver::Version::parse(&policy.minimum_agent_version)
+        .map_err(|_| ProtocolError::InvalidField("minimum_agent_version"))?;
+    let current = semver::Version::parse(current_agent_version)
+        .map_err(|_| ProtocolError::InvalidField("current_agent_version"))?;
+    if grant.agent_public_key.as_slice() != expected_agent_public_key
+        || grant.build_id != expected_build_id
+        || policy.game_id != grant.game_id
+        || policy.environment_id != grant.environment_id
+        || grant.policy_digest.as_slice() != Sha256::digest(&bundle.signed_policy).as_slice()
+    {
+        return Err(ProtocolError::InvalidField("launch_binding"));
+    }
+    if current < minimum {
+        return Err(ProtocolError::InvalidField("agent_update_required"));
+    }
+    Ok(BoundAgentLaunch {
+        session_id: grant.grant_id,
+        tenant_id: grant.tenant_id,
+        game_id: grant.game_id,
+        environment_id: grant.environment_id,
+        player_subject: grant.player_subject,
+        match_id: grant.match_id,
+        build_id: grant.build_id,
+        authoritative_server_id: grant.authoritative_server_id,
+        report_seconds: policy.report_seconds,
+        disconnect_grace_seconds: policy.disconnect_grace_seconds,
+    })
+}
+
+pub fn decode_challenge(
+    input: &[u8],
+    now_unix: i64,
+) -> Result<AgentReportChallengeV1, ProtocolError> {
+    let challenge: AgentReportChallengeV1 = decode_canonical(input)?;
+    if !identifier(&challenge.agent_session_id)
+        || challenge.nonce.len() < 16
+        || challenge.nonce.len() > 256
+        || challenge.expires_at_unix <= now_unix
+        || challenge.expires_at_unix > now_unix + 120
+    {
+        return Err(ProtocolError::InvalidField("challenge"));
+    }
+    Ok(challenge)
+}
+
 fn decode_canonical<M: Message + Default>(input: &[u8]) -> Result<M, ProtocolError> {
     if input.is_empty() || input.len() > MAX_MESSAGE_BYTES {
         return Err(ProtocolError::TooLarge);
@@ -322,6 +404,7 @@ fn validate_launch_grant(
         || !identifier(&claims.player_subject)
         || !identifier(&claims.match_id)
         || !identifier(&claims.build_id)
+        || !identifier(&claims.authoritative_server_id)
         || claims.agent_public_key.len() != 32
         || claims.policy_digest.len() != 32
         || claims.issued_at_unix > now_unix + 30
@@ -492,6 +575,7 @@ mod tests {
             issued_at_unix: 1_700_000_000,
             expires_at_unix: 1_700_000_060,
             policy_digest: vec![4; 32],
+            authoritative_server_id: "server-1".into(),
         };
         let encoded = claims.encode_to_vec();
         let mut message = LAUNCH_DOMAIN.to_vec();
@@ -553,6 +637,88 @@ mod tests {
     }
 
     #[test]
+    fn launch_bundle_binds_policy_key_build_and_agent_version() {
+        let root = SigningKey::generate(&mut OsRng);
+        let agent = SigningKey::generate(&mut OsRng);
+        let policy_claims = AgentPolicyClaimsV1 {
+            protocol_version: 1,
+            policy_id: "competitive".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            requirement_mode: AgentRequirementModeV1::Required as i32,
+            heartbeat_seconds: 15,
+            report_seconds: 60,
+            disconnect_grace_seconds: 30,
+            minimum_agent_version: "0.1.0".into(),
+            expires_at_unix: 1_700_003_600,
+        };
+        let policy_claim_bytes = policy_claims.encode_to_vec();
+        let policy = SignedAgentPolicyV1 {
+            signature: root
+                .sign(&[POLICY_DOMAIN, &policy_claim_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: policy_claim_bytes,
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let grant_claims = AgentLaunchGrantClaimsV1 {
+            protocol_version: 1,
+            grant_id: "session".into(),
+            tenant_id: "tenant".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            player_subject: "player".into(),
+            match_id: "match".into(),
+            build_id: "build".into(),
+            agent_public_key: agent.verifying_key().to_bytes().to_vec(),
+            issued_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_000_060,
+            policy_digest: Sha256::digest(&policy).to_vec(),
+            authoritative_server_id: "server".into(),
+        };
+        let grant_claim_bytes = grant_claims.encode_to_vec();
+        let grant = SignedAgentLaunchGrantV1 {
+            signature: root
+                .sign(&[LAUNCH_DOMAIN, &grant_claim_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: grant_claim_bytes,
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let bundle = AgentLaunchBundleV1 {
+            signed_policy: policy,
+            signed_launch_grant: grant,
+        }
+        .encode_to_vec();
+        assert_eq!(
+            verify_launch_bundle(
+                &bundle,
+                &key_ring(&root),
+                1_700_000_001,
+                &agent.verifying_key().to_bytes(),
+                "build",
+                "0.1.0",
+            )
+            .unwrap()
+            .session_id,
+            "session"
+        );
+        assert_eq!(
+            verify_launch_bundle(
+                &bundle,
+                &key_ring(&root),
+                1_700_000_001,
+                &agent.verifying_key().to_bytes(),
+                "other-build",
+                "0.1.0",
+            ),
+            Err(ProtocolError::InvalidField("launch_binding"))
+        );
+    }
+
+    #[test]
     fn rejects_noncanonical_claim_encoding() {
         let key = SigningKey::generate(&mut OsRng);
         // Field 1 encoded with a non-minimal varint. Prost accepts it, but the
@@ -592,5 +758,49 @@ mod tests {
             hex::encode(key.sign(&[POLICY_DOMAIN, &encoded].concat()).to_bytes()),
             "2c6e2be8708bf63e9865faa5b7ce261f49c4e85307bf5eaa65a620a8ed1babf852ea261768b233e87dfc0b95402ffb893b3a58b3582624a8cc9b1f9a72d37a08"
         );
+    }
+
+    #[test]
+    fn golden_launch_grant_vector_is_stable() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let policy_claims = AgentPolicyClaimsV1 {
+            protocol_version: 1,
+            policy_id: "competitive".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            requirement_mode: AgentRequirementModeV1::Required as i32,
+            heartbeat_seconds: 15,
+            report_seconds: 60,
+            disconnect_grace_seconds: 30,
+            minimum_agent_version: "1.0.0".into(),
+            expires_at_unix: 1_800_000_000,
+        };
+        let policy_bytes = policy_claims.encode_to_vec();
+        let signed_policy = SignedAgentPolicyV1 {
+            signature: key
+                .sign(&[POLICY_DOMAIN, &policy_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: policy_bytes,
+            key_id: "vector-key".into(),
+        }
+        .encode_to_vec();
+        let claims = AgentLaunchGrantClaimsV1 {
+            protocol_version: 1,
+            grant_id: "grant".into(),
+            tenant_id: "tenant".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            player_subject: "player".into(),
+            match_id: "match".into(),
+            build_id: "build".into(),
+            agent_public_key: key.verifying_key().to_bytes().to_vec(),
+            issued_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_000_060,
+            policy_digest: Sha256::digest(signed_policy).to_vec(),
+            authoritative_server_id: "server".into(),
+        };
+        let encoded = claims.encode_to_vec();
+        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa0662201cbfc3cdcad1c8675ee33a31ca90bbefe6e5bab3dec0264f786495f11915a0456a06736572766572");
     }
 }

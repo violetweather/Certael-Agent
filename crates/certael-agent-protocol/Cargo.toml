@@ -8,6 +8,7 @@ license.workspace = true
 ed25519-dalek.workspace = true
 prost.workspace = true
 sha2.workspace = true
+semver = "1"
 thiserror.workspace = true
 
 [dev-dependencies]

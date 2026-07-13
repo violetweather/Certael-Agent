@@ -1,5 +1,5 @@
+use crate::runtime::{self, RuntimeState};
 use anyhow::{bail, Context, Result};
-use certael_agent_ipc::{write_frame, Frame, MessageType};
 use std::{
     ffi::OsStr,
     os::windows::{ffi::OsStrExt, io::FromRawHandle},
@@ -11,17 +11,23 @@ use windows_sys::Win32::{
     },
     Security::SECURITY_ATTRIBUTES,
     System::{
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        },
         Pipes::CreatePipe,
         Threading::{
             CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-            InitializeProcThreadAttributeList, UpdateProcThreadAttribute, WaitForSingleObject,
-            CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
-            PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+            InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
+            WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
         },
     },
 };
 
-pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
+pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Result<()> {
     let mut security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -81,7 +87,7 @@ pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
             std::ptr::null(),
             std::ptr::null(),
             1,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT,
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
             environment.as_mut_ptr().cast(),
             std::ptr::null(),
             (&startup.StartupInfo) as *const _,
@@ -95,20 +101,27 @@ pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
     }
     let process_handle = OwnedHandle(process.hProcess);
     let _thread_handle = OwnedHandle(process.hThread);
+    let job = create_containment_job()?;
+    if unsafe { AssignProcessToJobObject(job.raw(), process_handle.raw()) } == 0 {
+        bail!("failed to contain protected game: {}", unsafe {
+            GetLastError()
+        });
+    }
+    if unsafe { ResumeThread(_thread_handle.raw()) } == u32::MAX {
+        bail!("failed to resume contained game: {}", unsafe {
+            GetLastError()
+        });
+    }
+    state.game_process_id = process.dwProcessId;
     drop(game_read);
     drop(game_write);
 
     let mut outbound = unsafe { std::fs::File::from_raw_handle(agent_write.take() as *mut _) };
-    let _inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
-    write_frame(
-        &mut outbound,
-        &Frame {
-            message_type: MessageType::AgentHello,
-            payload: hello,
-        },
-    )
-    .context("failed to bootstrap protected game")?;
+    let mut inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
+    runtime::serve(&mut inbound, &mut outbound, &state)
+        .context("protected Agent session failed")?;
     drop(outbound);
+    drop(inbound);
 
     if unsafe { WaitForSingleObject(process_handle.raw(), INFINITE) } != WAIT_OBJECT_0 {
         bail!("failed while waiting for protected game");
@@ -121,6 +134,32 @@ pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
         bail!("game exited unsuccessfully with code {exit_code}");
     }
     Ok(())
+}
+
+fn create_containment_job() -> Result<OwnedHandle> {
+    let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if job.is_null() {
+        bail!("failed to create game containment job: {}", unsafe {
+            GetLastError()
+        });
+    }
+    let job = OwnedHandle(job);
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if unsafe {
+        SetInformationJobObject(
+            job.raw(),
+            JobObjectExtendedLimitInformation,
+            (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        )
+    } == 0
+    {
+        bail!("failed to configure game containment job: {}", unsafe {
+            GetLastError()
+        });
+    }
+    Ok(job)
 }
 
 fn create_pipe(security: &mut SECURITY_ATTRIBUTES) -> Result<(OwnedHandle, OwnedHandle)> {

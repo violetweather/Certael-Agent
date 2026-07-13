@@ -402,6 +402,7 @@ dependencies = [
  "libc",
  "prost",
  "rand_core",
+ "serde",
  "serde_json",
  "sha2",
  "uuid",
@@ -421,8 +422,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "libc",
  "serde",
  "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -441,6 +444,7 @@ dependencies = [
  "hex",
  "prost",
  "rand_core",
+ "semver",
  "sha2",
  "thiserror 2.0.18",
 ]
