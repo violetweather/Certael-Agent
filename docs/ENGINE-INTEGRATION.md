@@ -11,5 +11,9 @@ The engine adapter must:
 5. Surface `ready`, `degraded`, `lost`, and `update_required` states.
 6. Dispose the channel during logout, account switch, or process exit.
 
-Godot receives this through a prebuilt GDExtension and autoload, Unity through a UPM runtime service with IL2CPP bindings, and Unreal through a GameInstance subsystem with typed Blueprint nodes. Security-sensitive messages are binary and typed; gameplay scripts never construct JSON security envelopes.
+The stable probe C ABI exposes `certael_agent_channel_open`,
+`certael_agent_channel_read`, and `certael_agent_channel_destroy`. A buffer-too-small
+read reports the required length without consuming the pending frame. Every other
+language binding must preserve this ownership and retry behavior.
 
+Godot receives this through a prebuilt GDExtension and autoload, Unity through a UPM runtime service with IL2CPP bindings, and Unreal through a GameInstance subsystem with typed Blueprint nodes. Security-sensitive messages are binary and typed; gameplay scripts never construct JSON security envelopes.

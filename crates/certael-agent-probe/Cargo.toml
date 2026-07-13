@@ -8,5 +8,5 @@ license.workspace = true
 crate-type = ["cdylib", "staticlib"]
 
 [dependencies]
+certael-agent-ipc = { path = "../certael-agent-ipc" }
 sha2.workspace = true
-

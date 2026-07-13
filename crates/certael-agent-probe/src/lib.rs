@@ -2,6 +2,7 @@ use sha2::{Digest, Sha256};
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     slice,
+    sync::Mutex,
 };
 
 pub const CERTAEL_PROBE_ABI_VERSION: u32 = 1;
@@ -12,7 +13,20 @@ pub enum CertaelProbeResult {
     Ok = 0,
     InvalidArgument = 1,
     BufferTooSmall = 2,
+    NotConnected = 3,
+    InvalidFrame = 4,
+    UnsupportedPlatform = 5,
     InternalError = 255,
+}
+
+pub struct CertaelAgentChannel {
+    state: Mutex<ChannelState>,
+}
+
+struct ChannelState {
+    #[cfg(unix)]
+    file: std::fs::File,
+    pending: Option<certael_agent_ipc::Frame>,
 }
 
 #[no_mangle]
@@ -48,6 +62,114 @@ pub unsafe extern "C" fn certael_probe_bind_nonce(
     .unwrap_or(CertaelProbeResult::InternalError)
 }
 
+/// Opens the private channel inherited from Certael Agent.
+///
+/// # Safety
+/// `output` must point to writable storage for one channel pointer. The caller
+/// owns the returned channel and must destroy it exactly once.
+#[no_mangle]
+pub unsafe extern "C" fn certael_agent_channel_open(
+    output: *mut *mut CertaelAgentChannel,
+) -> CertaelProbeResult {
+    catch_unwind(AssertUnwindSafe(|| {
+        if output.is_null() {
+            return CertaelProbeResult::InvalidArgument;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::fd::FromRawFd;
+            let Ok(raw) = std::env::var("CERTAEL_AGENT_FD") else {
+                return CertaelProbeResult::NotConnected;
+            };
+            let Ok(fd) = raw.parse::<std::os::fd::RawFd>() else {
+                return CertaelProbeResult::NotConnected;
+            };
+            if fd < 0 {
+                return CertaelProbeResult::NotConnected;
+            }
+            std::env::remove_var("CERTAEL_AGENT_FD");
+            let channel = Box::new(CertaelAgentChannel {
+                state: Mutex::new(ChannelState {
+                    file: std::fs::File::from_raw_fd(fd),
+                    pending: None,
+                }),
+            });
+            output.write(Box::into_raw(channel));
+            CertaelProbeResult::Ok
+        }
+        #[cfg(not(unix))]
+        {
+            output.write(std::ptr::null_mut());
+            CertaelProbeResult::UnsupportedPlatform
+        }
+    }))
+    .unwrap_or(CertaelProbeResult::InternalError)
+}
+
+/// Reads one typed frame without losing it when the caller's buffer is small.
+///
+/// # Safety
+/// `channel` must be a live pointer returned by `certael_agent_channel_open`.
+/// `message_type` and `written` must be writable. When `capacity` is nonzero,
+/// `output` must point to `capacity` writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn certael_agent_channel_read(
+    channel: *mut CertaelAgentChannel,
+    message_type: *mut u8,
+    output: *mut u8,
+    capacity: usize,
+    written: *mut usize,
+) -> CertaelProbeResult {
+    catch_unwind(AssertUnwindSafe(|| {
+        if channel.is_null()
+            || message_type.is_null()
+            || written.is_null()
+            || (capacity > 0 && output.is_null())
+        {
+            return CertaelProbeResult::InvalidArgument;
+        }
+        let channel = &*channel;
+        let Ok(mut state) = channel.state.lock() else {
+            return CertaelProbeResult::InternalError;
+        };
+        #[cfg(unix)]
+        if state.pending.is_none() {
+            state.pending = match certael_agent_ipc::read_frame(&mut state.file) {
+                Ok(frame) => Some(frame),
+                Err(_) => return CertaelProbeResult::InvalidFrame,
+            };
+        }
+        #[cfg(not(unix))]
+        return CertaelProbeResult::UnsupportedPlatform;
+        #[cfg(unix)]
+        {
+            let frame = state.pending.as_ref().expect("pending frame");
+            written.write(frame.payload.len());
+            message_type.write(frame.message_type as u8);
+            if capacity < frame.payload.len() {
+                return CertaelProbeResult::BufferTooSmall;
+            }
+            std::ptr::copy_nonoverlapping(frame.payload.as_ptr(), output, frame.payload.len());
+            state.pending = None;
+            CertaelProbeResult::Ok
+        }
+    }))
+    .unwrap_or(CertaelProbeResult::InternalError)
+}
+
+/// Destroys a channel created by `certael_agent_channel_open`.
+///
+/// # Safety
+/// `channel` must be null or a live pointer returned by
+/// `certael_agent_channel_open`, and it must not be used again after this call.
+#[no_mangle]
+pub unsafe extern "C" fn certael_agent_channel_destroy(channel: *mut CertaelAgentChannel) {
+    if channel.is_null() {
+        return;
+    }
+    let _ = catch_unwind(AssertUnwindSafe(|| drop(Box::from_raw(channel))));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +187,59 @@ mod tests {
         };
         assert_eq!(result, CertaelProbeResult::Ok);
         assert_ne!(output, [0; 32]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn channel_preserves_frame_when_buffer_is_too_small() {
+        use certael_agent_ipc::{write_frame, Frame, MessageType};
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+        write_frame(
+            &mut writer,
+            &Frame {
+                message_type: MessageType::AgentHello,
+                payload: vec![1, 2, 3, 4],
+            },
+        )
+        .unwrap();
+        let channel = Box::into_raw(Box::new(CertaelAgentChannel {
+            state: Mutex::new(ChannelState {
+                file: unsafe { std::fs::File::from_raw_fd(reader.into_raw_fd()) },
+                pending: None,
+            }),
+        }));
+        let mut message_type = 0;
+        let mut written = 0;
+        let mut short = [0_u8; 2];
+        assert_eq!(
+            unsafe {
+                certael_agent_channel_read(
+                    channel,
+                    &mut message_type,
+                    short.as_mut_ptr(),
+                    short.len(),
+                    &mut written,
+                )
+            },
+            CertaelProbeResult::BufferTooSmall
+        );
+        assert_eq!(written, 4);
+        let mut complete = [0_u8; 4];
+        assert_eq!(
+            unsafe {
+                certael_agent_channel_read(
+                    channel,
+                    &mut message_type,
+                    complete.as_mut_ptr(),
+                    complete.len(),
+                    &mut written,
+                )
+            },
+            CertaelProbeResult::Ok
+        );
+        assert_eq!(message_type, MessageType::AgentHello as u8);
+        assert_eq!(complete, [1, 2, 3, 4]);
+        unsafe { certael_agent_channel_destroy(channel) };
     }
 }

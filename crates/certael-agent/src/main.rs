@@ -11,6 +11,8 @@ use std::{
     process::{Command, Stdio},
 };
 
+mod ui;
+
 #[derive(Parser)]
 #[command(
     name = "certael-agent",
@@ -18,7 +20,7 @@ use std::{
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
@@ -37,11 +39,12 @@ enum Commands {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
-        Commands::Inspect { game } => println!(
+        Some(Commands::Inspect { game }) => println!(
             "{}",
             serde_json::to_string_pretty(&inspect_executable(&game)?)?
         ),
-        Commands::Launch { game, args } => launch(game, args)?,
+        Some(Commands::Launch { game, args }) => launch(game, args)?,
+        None => ui::run()?,
     }
     Ok(())
 }

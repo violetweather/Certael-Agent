@@ -19,7 +19,7 @@ This repository remains pre-1.0 until every gate has published evidence.
 - [ ] macOS Developer ID, notarization, hardened-runtime, and Mach-O checks
 - [ ] Linux ELF build-ID and pidfd checks
 - [ ] Prebuilt Godot, Unity, and Unreal packages
-- [ ] Native minimal UI and telemetry disclosure screen
+- [x] Native minimal UI and telemetry disclosure screen
 - [ ] Raw 24-hour and derived 30-day retention enforcement
 - [ ] 100,000-session load and 24-hour soak evidence
 - [ ] Signed/notarized artifacts, SBOM, provenance, and verification guide
