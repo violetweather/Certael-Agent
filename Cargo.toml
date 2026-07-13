@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/certael-agent-protocol", "crates/certael-agent-platform", "crates/certael-agent", "crates/certael-agent-probe"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/violetweather/Certael-Agent"
+rust-version = "1.85"
+
+[workspace.dependencies]
+anyhow = "1"
+base64 = "0.22"
+ed25519-dalek = { version = "2.1", features = ["rand_core", "zeroize"] }
+hex = "0.4"
+prost = "0.13"
+rand_core = { version = "0.6", features = ["getrandom"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+

@@ -1,0 +1,50 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+  id-token: write
+  attestations: write
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            artifact: certael-agent-linux-x86_64
+          - os: windows-2025
+            artifact: certael-agent-windows-x86_64
+          - os: macos-15
+            artifact: certael-agent-macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - run: cargo test --workspace --locked
+      - run: cargo build --workspace --release --locked
+      - name: Package Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/certael-agent dist/
+          cp target/release/libcertael_agent_probe.* dist/ 2>/dev/null || true
+          cp README.md LICENSE include/certael_agent_probe.h dist/
+          tar -C dist -czf "${{ matrix.artifact }}.tar.gz" .
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist
+          Copy-Item target/release/certael-agent.exe dist/
+          Copy-Item target/release/certael_agent_probe.dll dist/
+          Copy-Item README.md,LICENSE,include/certael_agent_probe.h dist/
+          Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: certael-agent-*
+          if-no-files-found: error
+          retention-days: 14
