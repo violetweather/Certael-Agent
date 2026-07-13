@@ -202,6 +202,7 @@ mod tests {
             issued_at_unix: now,
             expires_at_unix: now + 60,
             policy_digest: Sha256::digest(&policy).to_vec(),
+            authoritative_server_id: "server".into(),
         };
         let grant_claim_bytes = grant_claims.encode_to_vec();
         let grant = SignedAgentLaunchGrantV1 {

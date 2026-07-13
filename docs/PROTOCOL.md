@@ -19,7 +19,9 @@ The second message must be `AgentLaunchBundleV1`. Its nested signed policy and
 launch grant are themselves canonically encoded and verified against a pinned,
 time-bounded, non-revoked trust-store key. Admission binds the policy digest,
 ephemeral Agent public key, executable build, game, environment, grant expiry,
-and minimum Agent version. Trust roots are never accepted from the game channel.
+authoritative server, and minimum Agent version. A server migration requires a
+new Agent session and signed grant; an existing binding is never edited. Trust
+roots are never accepted from the game channel.
 
 After admission, only fresh `AgentReportChallengeV1` messages and an empty
 shutdown frame are accepted from the game. Each response advances an exact

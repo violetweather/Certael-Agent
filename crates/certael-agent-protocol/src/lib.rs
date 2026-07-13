@@ -76,6 +76,8 @@ pub struct AgentLaunchGrantClaimsV1 {
     pub expires_at_unix: i64,
     #[prost(bytes = "vec", tag = "12")]
     pub policy_digest: Vec<u8>,
+    #[prost(string, tag = "13")]
+    pub authoritative_server_id: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -119,6 +121,7 @@ pub struct BoundAgentLaunch {
     pub player_subject: String,
     pub match_id: String,
     pub build_id: String,
+    pub authoritative_server_id: String,
     pub report_seconds: u32,
     pub disconnect_grace_seconds: u32,
 }
@@ -321,6 +324,7 @@ pub fn verify_launch_bundle(
         player_subject: grant.player_subject,
         match_id: grant.match_id,
         build_id: grant.build_id,
+        authoritative_server_id: grant.authoritative_server_id,
         report_seconds: policy.report_seconds,
         disconnect_grace_seconds: policy.disconnect_grace_seconds,
     })
@@ -400,6 +404,7 @@ fn validate_launch_grant(
         || !identifier(&claims.player_subject)
         || !identifier(&claims.match_id)
         || !identifier(&claims.build_id)
+        || !identifier(&claims.authoritative_server_id)
         || claims.agent_public_key.len() != 32
         || claims.policy_digest.len() != 32
         || claims.issued_at_unix > now_unix + 30
@@ -570,6 +575,7 @@ mod tests {
             issued_at_unix: 1_700_000_000,
             expires_at_unix: 1_700_000_060,
             policy_digest: vec![4; 32],
+            authoritative_server_id: "server-1".into(),
         };
         let encoded = claims.encode_to_vec();
         let mut message = LAUNCH_DOMAIN.to_vec();
@@ -669,6 +675,7 @@ mod tests {
             issued_at_unix: 1_700_000_000,
             expires_at_unix: 1_700_000_060,
             policy_digest: Sha256::digest(&policy).to_vec(),
+            authoritative_server_id: "server".into(),
         };
         let grant_claim_bytes = grant_claims.encode_to_vec();
         let grant = SignedAgentLaunchGrantV1 {
@@ -751,5 +758,49 @@ mod tests {
             hex::encode(key.sign(&[POLICY_DOMAIN, &encoded].concat()).to_bytes()),
             "2c6e2be8708bf63e9865faa5b7ce261f49c4e85307bf5eaa65a620a8ed1babf852ea261768b233e87dfc0b95402ffb893b3a58b3582624a8cc9b1f9a72d37a08"
         );
+    }
+
+    #[test]
+    fn golden_launch_grant_vector_is_stable() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let policy_claims = AgentPolicyClaimsV1 {
+            protocol_version: 1,
+            policy_id: "competitive".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            requirement_mode: AgentRequirementModeV1::Required as i32,
+            heartbeat_seconds: 15,
+            report_seconds: 60,
+            disconnect_grace_seconds: 30,
+            minimum_agent_version: "1.0.0".into(),
+            expires_at_unix: 1_800_000_000,
+        };
+        let policy_bytes = policy_claims.encode_to_vec();
+        let signed_policy = SignedAgentPolicyV1 {
+            signature: key
+                .sign(&[POLICY_DOMAIN, &policy_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: policy_bytes,
+            key_id: "vector-key".into(),
+        }
+        .encode_to_vec();
+        let claims = AgentLaunchGrantClaimsV1 {
+            protocol_version: 1,
+            grant_id: "grant".into(),
+            tenant_id: "tenant".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            player_subject: "player".into(),
+            match_id: "match".into(),
+            build_id: "build".into(),
+            agent_public_key: key.verifying_key().to_bytes().to_vec(),
+            issued_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_000_060,
+            policy_digest: Sha256::digest(signed_policy).to_vec(),
+            authoritative_server_id: "server".into(),
+        };
+        let encoded = claims.encode_to_vec();
+        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa0662201cbfc3cdcad1c8675ee33a31ca90bbefe6e5bab3dec0264f786495f11915a0456a06736572766572");
     }
 }

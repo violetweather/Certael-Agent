@@ -33,5 +33,7 @@ The launch bundle must come from the authenticated authoritative-server API. A
 client script cannot mint it, substitute its Agent key, alter the build, extend
 its lifetime, or lower the minimum Agent version without invalidating the
 operator signature.
+The grant also binds the authoritative server ID, so migration to another
+server requires a new Agent session and launch bundle.
 
 Godot receives this through a prebuilt GDExtension and autoload, Unity through a UPM runtime service with IL2CPP bindings, and Unreal through a GameInstance subsystem with typed Blueprint nodes. Security-sensitive messages are binary and typed; gameplay scripts never construct JSON security envelopes.
