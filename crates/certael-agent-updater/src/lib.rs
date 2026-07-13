@@ -274,6 +274,11 @@ pub fn recover(install_root: &Path) -> Result<ActivationState, UpdateError> {
 }
 
 pub fn read_activation_state(install_root: &Path) -> Result<ActivationState, UpdateError> {
+    let root = canonical_install_root(install_root)?;
+    read_activation_state_canonical(&root)
+}
+
+fn read_activation_state_canonical(install_root: &Path) -> Result<ActivationState, UpdateError> {
     let path = install_root.join("activation.json");
     if !path.exists() {
         return Ok(ActivationState::default());
@@ -440,9 +445,24 @@ fn validate_slot(slot: &ActivationSlot) -> Result<(), UpdateError> {
 fn safe_component(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
+        && value != "."
+        && value != ".."
+        && !windows_reserved_component(value)
         && value
             .bytes()
             .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+}
+
+fn windows_reserved_component(value: &str) -> bool {
+    let stem = value
+        .split('.')
+        .next()
+        .unwrap_or(value)
+        .to_ascii_uppercase();
+    matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'))
 }
 
 fn valid_digest(value: &str) -> bool {
