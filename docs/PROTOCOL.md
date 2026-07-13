@@ -13,3 +13,4 @@ certael.agent.update.v1\0
 
 Reports are signed over the report with its signature field omitted. Servers verify the session ID, build ID, fresh challenge, exact next sequence, previous report digest, expiry, and Ed25519 signature before storing evidence. Protocol v1 becomes immutable at the 1.0 release.
 
+Local engine communication uses a typed frame with `CTAL` magic, protocol version, message type, and a network-byte-order payload length. Unknown types, unsupported versions, truncated frames, and payloads over 64 KiB are rejected. The first message is `AgentHelloV1`; a hello is bootstrap identity, not an integrity report and not proof of trust.

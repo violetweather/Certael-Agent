@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+certael-agent-ipc = { path = "../certael-agent-ipc" }
 certael-agent-platform = { path = "../certael-agent-platform" }
 certael-agent-protocol = { path = "../certael-agent-protocol" }
 clap = { version = "4", features = ["derive"] }

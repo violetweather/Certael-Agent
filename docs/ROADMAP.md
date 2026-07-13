@@ -7,8 +7,12 @@ This repository remains pre-1.0 until every gate has published evidence.
 - [x] Strict size, session, nonce, sequence, and digest-chain verification
 - [x] Panic-contained probe C ABI
 - [x] Private inherited Unix launch channel
+- [x] Bounded typed IPC framing with malformed/oversized-frame tests
+- [x] Revocable signing-key ring and canonical signed policy verification
+- [x] Short-lived launch-grant verification bound to Agent key and policy digest
+- [x] Fresh one-time challenge handling and chained signed report state
 - [ ] Restricted inherited Windows named-pipe implementation
-- [ ] Production launch-grant redemption and challenge transport
+- [ ] Production network launch-grant redemption and challenge transport
 - [ ] Signed immutable policy lifecycle
 - [ ] TUF-style updater with offline root ceremony
 - [ ] Windows Authenticode validation and process mitigations

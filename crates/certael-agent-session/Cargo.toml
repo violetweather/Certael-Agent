@@ -1,0 +1,16 @@
+[package]
+name = "certael-agent-session"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+certael-agent-protocol = { path = "../certael-agent-protocol" }
+ed25519-dalek.workspace = true
+prost.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand_core.workspace = true
+

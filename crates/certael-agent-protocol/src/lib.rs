@@ -79,6 +79,20 @@ pub struct AgentLaunchGrantClaimsV1 {
 }
 
 #[derive(Clone, PartialEq, Message)]
+pub struct AgentHelloV1 {
+    #[prost(uint32, tag = "1")]
+    pub protocol_version: u32,
+    #[prost(string, tag = "2")]
+    pub agent_version: String,
+    #[prost(bytes = "vec", tag = "3")]
+    pub agent_public_key: Vec<u8>,
+    #[prost(string, tag = "4")]
+    pub build_id: String,
+    #[prost(bytes = "vec", tag = "5")]
+    pub executable_sha256: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
 pub struct SignedAgentLaunchGrantV1 {
     #[prost(bytes = "vec", tag = "1")]
     pub claims: Vec<u8>,
@@ -162,6 +176,180 @@ pub enum ProtocolError {
     InvalidField(&'static str),
     #[error("protobuf decode failed")]
     Decode,
+    #[error("signed object is expired or not yet valid")]
+    Expired,
+    #[error("unknown or revoked signing key")]
+    UnknownKey,
+    #[error("protobuf encoding is not canonical")]
+    NonCanonical,
+}
+
+#[derive(Clone)]
+pub struct VerificationKey {
+    pub key_id: String,
+    pub key: VerifyingKey,
+    pub not_before_unix: i64,
+    pub not_after_unix: i64,
+    pub revoked: bool,
+}
+
+pub struct VerificationKeyRing {
+    keys: Vec<VerificationKey>,
+}
+
+impl VerificationKeyRing {
+    pub fn new(keys: Vec<VerificationKey>) -> Result<Self, ProtocolError> {
+        if keys.is_empty()
+            || keys.iter().any(|key| {
+                key.key_id.is_empty()
+                    || key.key_id.len() > 128
+                    || key.not_before_unix >= key.not_after_unix
+            })
+        {
+            return Err(ProtocolError::InvalidField("verification_keys"));
+        }
+        for (index, key) in keys.iter().enumerate() {
+            if keys[..index]
+                .iter()
+                .any(|candidate| candidate.key_id == key.key_id)
+            {
+                return Err(ProtocolError::InvalidField("duplicate_key_id"));
+            }
+        }
+        Ok(Self { keys })
+    }
+
+    fn resolve(&self, key_id: &str, now_unix: i64) -> Result<&VerifyingKey, ProtocolError> {
+        let key = self
+            .keys
+            .iter()
+            .find(|candidate| candidate.key_id == key_id)
+            .ok_or(ProtocolError::UnknownKey)?;
+        if key.revoked || now_unix < key.not_before_unix || now_unix >= key.not_after_unix {
+            return Err(ProtocolError::UnknownKey);
+        }
+        Ok(&key.key)
+    }
+}
+
+pub fn verify_policy(
+    signed: &SignedAgentPolicyV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<AgentPolicyClaimsV1, ProtocolError> {
+    let claims: AgentPolicyClaimsV1 = decode_canonical(&signed.claims)?;
+    validate_policy(&claims, now_unix)?;
+    verify_signed_bytes(
+        POLICY_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+pub fn verify_launch_grant(
+    signed: &SignedAgentLaunchGrantV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<AgentLaunchGrantClaimsV1, ProtocolError> {
+    let claims: AgentLaunchGrantClaimsV1 = decode_canonical(&signed.claims)?;
+    validate_launch_grant(&claims, now_unix)?;
+    verify_signed_bytes(
+        LAUNCH_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+fn decode_canonical<M: Message + Default>(input: &[u8]) -> Result<M, ProtocolError> {
+    if input.is_empty() || input.len() > MAX_MESSAGE_BYTES {
+        return Err(ProtocolError::TooLarge);
+    }
+    let value = M::decode(input).map_err(|_| ProtocolError::Decode)?;
+    if value.encode_to_vec() != input {
+        return Err(ProtocolError::NonCanonical);
+    }
+    Ok(value)
+}
+
+fn verify_signed_bytes(
+    domain: &[u8],
+    claims: &[u8],
+    signature: &[u8],
+    key: &VerifyingKey,
+) -> Result<(), ProtocolError> {
+    let signature =
+        Signature::from_slice(signature).map_err(|_| ProtocolError::InvalidSignature)?;
+    let mut message = Vec::with_capacity(domain.len() + claims.len());
+    message.extend_from_slice(domain);
+    message.extend_from_slice(claims);
+    key.verify(&message, &signature)
+        .map_err(|_| ProtocolError::InvalidSignature)
+}
+
+fn validate_policy(claims: &AgentPolicyClaimsV1, now_unix: i64) -> Result<(), ProtocolError> {
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.policy_id)
+        || !identifier(&claims.game_id)
+        || !identifier(&claims.environment_id)
+        || AgentRequirementModeV1::try_from(claims.requirement_mode).is_err()
+        || !(5..=300).contains(&claims.heartbeat_seconds)
+        || !(15..=3600).contains(&claims.report_seconds)
+        || claims.report_seconds < claims.heartbeat_seconds
+        || claims.disconnect_grace_seconds > 300
+        || !version_identifier(&claims.minimum_agent_version)
+    {
+        return Err(ProtocolError::InvalidField("policy"));
+    }
+    if claims.expires_at_unix <= now_unix {
+        return Err(ProtocolError::Expired);
+    }
+    Ok(())
+}
+
+fn validate_launch_grant(
+    claims: &AgentLaunchGrantClaimsV1,
+    now_unix: i64,
+) -> Result<(), ProtocolError> {
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.grant_id)
+        || !identifier(&claims.tenant_id)
+        || !identifier(&claims.game_id)
+        || !identifier(&claims.environment_id)
+        || !identifier(&claims.player_subject)
+        || !identifier(&claims.match_id)
+        || !identifier(&claims.build_id)
+        || claims.agent_public_key.len() != 32
+        || claims.policy_digest.len() != 32
+        || claims.issued_at_unix > now_unix + 30
+        || claims.expires_at_unix <= claims.issued_at_unix
+        || claims.expires_at_unix - claims.issued_at_unix > 120
+    {
+        return Err(ProtocolError::InvalidField("launch_grant"));
+    }
+    if claims.expires_at_unix <= now_unix {
+        return Err(ProtocolError::Expired);
+    }
+    Ok(())
+}
+
+fn identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'_' | b'-'))
+}
+
+fn version_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .bytes()
+            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'.' | b'+' | b'-'))
 }
 
 pub fn signing_bytes<M: Message>(domain: &[u8], message: &M) -> Result<Vec<u8>, ProtocolError> {
@@ -274,6 +462,112 @@ mod tests {
         assert_eq!(
             sign_report(value, &key),
             Err(ProtocolError::InvalidField("challenge_nonce"))
+        );
+    }
+
+    fn key_ring(key: &SigningKey) -> VerificationKeyRing {
+        VerificationKeyRing::new(vec![VerificationKey {
+            key_id: "root-1".into(),
+            key: key.verifying_key(),
+            not_before_unix: 1_600_000_000,
+            not_after_unix: 1_800_000_000,
+            revoked: false,
+        }])
+        .unwrap()
+    }
+
+    #[test]
+    fn verifies_bound_short_lived_launch_grant() {
+        let key = SigningKey::generate(&mut OsRng);
+        let claims = AgentLaunchGrantClaimsV1 {
+            protocol_version: 1,
+            grant_id: "grant-1".into(),
+            tenant_id: "tenant-1".into(),
+            game_id: "game-1".into(),
+            environment_id: "prod".into(),
+            player_subject: "player-1".into(),
+            match_id: "match-1".into(),
+            build_id: "build-1".into(),
+            agent_public_key: vec![3; 32],
+            issued_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_000_060,
+            policy_digest: vec![4; 32],
+        };
+        let encoded = claims.encode_to_vec();
+        let mut message = LAUNCH_DOMAIN.to_vec();
+        message.extend_from_slice(&encoded);
+        let signed = SignedAgentLaunchGrantV1 {
+            claims: encoded,
+            signature: key.sign(&message).to_bytes().to_vec(),
+            key_id: "root-1".into(),
+        };
+        assert_eq!(
+            verify_launch_grant(&signed, &key_ring(&key), 1_700_000_001).unwrap(),
+            claims
+        );
+        assert_eq!(
+            verify_launch_grant(&signed, &key_ring(&key), 1_700_000_061),
+            Err(ProtocolError::Expired)
+        );
+    }
+
+    #[test]
+    fn verifies_policy_and_rejects_revoked_key() {
+        let key = SigningKey::generate(&mut OsRng);
+        let claims = AgentPolicyClaimsV1 {
+            protocol_version: 1,
+            policy_id: "competitive-default".into(),
+            game_id: "game-1".into(),
+            environment_id: "prod".into(),
+            requirement_mode: AgentRequirementModeV1::Required as i32,
+            heartbeat_seconds: 15,
+            report_seconds: 60,
+            disconnect_grace_seconds: 30,
+            minimum_agent_version: "0.1.0".into(),
+            expires_at_unix: 1_700_003_600,
+        };
+        let encoded = claims.encode_to_vec();
+        let mut message = POLICY_DOMAIN.to_vec();
+        message.extend_from_slice(&encoded);
+        let signed = SignedAgentPolicyV1 {
+            claims: encoded,
+            signature: key.sign(&message).to_bytes().to_vec(),
+            key_id: "root-1".into(),
+        };
+        assert_eq!(
+            verify_policy(&signed, &key_ring(&key), 1_700_000_000).unwrap(),
+            claims
+        );
+        let revoked = VerificationKeyRing::new(vec![VerificationKey {
+            key_id: "root-1".into(),
+            key: key.verifying_key(),
+            not_before_unix: 1_600_000_000,
+            not_after_unix: 1_800_000_000,
+            revoked: true,
+        }])
+        .unwrap();
+        assert_eq!(
+            verify_policy(&signed, &revoked, 1_700_000_000),
+            Err(ProtocolError::UnknownKey)
+        );
+    }
+
+    #[test]
+    fn rejects_noncanonical_claim_encoding() {
+        let key = SigningKey::generate(&mut OsRng);
+        // Field 1 encoded with a non-minimal varint. Prost accepts it, but the
+        // canonical re-encoding differs and must therefore be rejected.
+        let claims = vec![0x08, 0x81, 0x00];
+        let mut message = POLICY_DOMAIN.to_vec();
+        message.extend_from_slice(&claims);
+        let signed = SignedAgentPolicyV1 {
+            claims,
+            signature: key.sign(&message).to_bytes().to_vec(),
+            key_id: "root-1".into(),
+        };
+        assert_eq!(
+            verify_policy(&signed, &key_ring(&key), 1_700_000_000),
+            Err(ProtocolError::NonCanonical)
         );
     }
 }

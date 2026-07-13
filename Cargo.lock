@@ -90,6 +90,7 @@ name = "certael-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "certael-agent-ipc",
  "certael-agent-platform",
  "certael-agent-protocol",
  "clap",
@@ -101,6 +102,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "uuid",
+]
+
+[[package]]
+name = "certael-agent-ipc"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
 ]
 
 [[package]]
@@ -124,6 +132,18 @@ dependencies = [
 name = "certael-agent-protocol"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
+ "prost",
+ "rand_core",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
+name = "certael-agent-session"
+version = "0.1.0"
+dependencies = [
+ "certael-agent-protocol",
  "ed25519-dalek",
  "prost",
  "rand_core",

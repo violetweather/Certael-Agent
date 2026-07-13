@@ -1,8 +1,6 @@
 use anyhow::{bail, Context, Result};
 use certael_agent_platform::{inspect_executable, validate_game_path};
-use certael_agent_protocol::{
-    sign_report, AgentIntegrityReportV1, IntegrityObservationV1, PROTOCOL_VERSION,
-};
+use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 #[cfg(unix)]
@@ -11,7 +9,6 @@ use rand_core::OsRng;
 use std::{
     path::PathBuf,
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Parser)]
@@ -53,37 +50,19 @@ fn launch(game: PathBuf, args: Vec<String>) -> Result<()> {
     let game = validate_game_path(&game)?;
     let snapshot = inspect_executable(&game)?;
     let key = SigningKey::generate(&mut OsRng);
-    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-    let report = sign_report(
-        AgentIntegrityReportV1 {
-            protocol_version: PROTOCOL_VERSION,
-            agent_session_id: uuid::Uuid::new_v4().simple().to_string(),
-            sequence: 1,
-            challenge_nonce: vec![0; 32],
-            observed_at_unix: now,
-            build_id: snapshot.executable_sha256.clone(),
-            executable_sha256: hex_to_32(&snapshot.executable_sha256)?,
-            observations: vec![
-                IntegrityObservationV1 {
-                    code: "platform".into(),
-                    value: snapshot.platform.clone(),
-                },
-                IntegrityObservationV1 {
-                    code: "debugger_observed".into(),
-                    value: snapshot.debugger_observed.to_string(),
-                },
-            ],
-            previous_report_digest: vec![],
-            signature: vec![],
-        },
-        &key,
-    )?;
+    let hello = AgentHelloV1 {
+        protocol_version: PROTOCOL_VERSION,
+        agent_version: env!("CARGO_PKG_VERSION").into(),
+        agent_public_key: key.verifying_key().as_bytes().to_vec(),
+        build_id: snapshot.executable_sha256.clone(),
+        executable_sha256: hex_to_32(&snapshot.executable_sha256)?,
+    };
 
     #[cfg(unix)]
-    return launch_unix(game, args, report.encode_to_vec());
+    return launch_unix(game, args, hello.encode_to_vec());
     #[cfg(not(unix))]
     {
-        let _ = report;
+        let _ = hello;
         let status = Command::new(game)
             .args(args)
             .stdin(Stdio::null())
@@ -97,8 +76,8 @@ fn launch(game: PathBuf, args: Vec<String>) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn launch_unix(game: PathBuf, args: Vec<String>, report: Vec<u8>) -> Result<()> {
-    use std::io::Write;
+fn launch_unix(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
+    use certael_agent_ipc::{write_frame, Frame, MessageType};
     use std::os::fd::{FromRawFd, RawFd};
     let mut fds: [RawFd; 2] = [-1, -1];
     let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
@@ -131,8 +110,13 @@ fn launch_unix(game: PathBuf, args: Vec<String>, report: Vec<u8>) -> Result<()> 
         libc::close(child_fd);
     }
     let mut channel = unsafe { std::fs::File::from_raw_fd(fds[0]) };
-    channel.write_all(&(report.len() as u32).to_be_bytes())?;
-    channel.write_all(&report)?;
+    write_frame(
+        &mut channel,
+        &Frame {
+            message_type: MessageType::AgentHello,
+            payload: hello,
+        },
+    )?;
     drop(channel);
     let status = child.wait()?;
     if !status.success() {
