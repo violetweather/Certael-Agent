@@ -48,3 +48,42 @@ jobs:
           path: certael-agent-*
           if-no-files-found: error
           retention-days: 14
+
+  publish:
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: certael-agent-*
+          path: release
+          merge-multiple: true
+      - name: Generate CycloneDX SBOMs
+        run: |
+          set -euo pipefail
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx --format json --spec-version 1.5 --target all
+          find . -path '*/target' -prune -o -name bom.json -print0 | \
+            tar --null -czf "release/certael-agent-sbom-${GITHUB_REF_NAME}.tar.gz" --files-from=-
+      - name: Checksums
+        run: (cd release && sha256sum * > checksums-sha256.txt)
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with: { cosign-release: v3.0.6 }
+      - name: Keyless-sign release files
+        run: |
+          set -euo pipefail
+          for artifact in release/*; do
+            cosign sign-blob --yes --bundle "${artifact}.sigstore.json" "$artifact"
+          done
+      - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
+        with: { subject-path: "release/**" }
+      - name: Publish pre-release
+        env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --generate-notes
