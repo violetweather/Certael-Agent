@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use certael_agent_ipc::{read_frame, write_frame, Frame, IpcError, MessageType};
-use certael_agent_platform::inspect_executable;
+use certael_agent_platform::{inspect_executable, inspect_game_process};
 use certael_agent_protocol::{
     decode_challenge, report_digest, sign_report, verify_launch_bundle, AgentHelloV1,
     AgentIntegrityReportV1, IntegrityObservationV1, VerificationKeyRing, PROTOCOL_VERSION,
@@ -65,10 +65,23 @@ pub fn serve(reader: &mut impl Read, writer: &mut impl Write, state: &RuntimeSta
                 if snapshot.executable_sha256 != state.hello.build_id {
                     bail!("protected executable changed after launch");
                 }
+                let game_process = inspect_game_process(state.game_process_id, &state.game);
                 let mut observations = vec![
                     observation("agent.platform", &snapshot.platform),
                     observation("agent.process_id", &std::process::id().to_string()),
                     observation("game.process_id", &state.game_process_id.to_string()),
+                    observation("game.process_running", bool_value(game_process.running)),
+                    observation(
+                        "game.executable_matches",
+                        bool_value(game_process.executable_matches),
+                    ),
+                    observation(
+                        "game.parent_is_agent",
+                        game_process
+                            .parent_is_agent
+                            .map(bool_value)
+                            .unwrap_or("unknown"),
+                    ),
                     observation(
                         "agent.debugger_observed",
                         if snapshot.debugger_observed {
@@ -130,6 +143,14 @@ fn observation(code: &str, value: &str) -> IntegrityObservationV1 {
     IntegrityObservationV1 {
         code: code.to_owned(),
         value: value.to_owned(),
+    }
+}
+
+fn bool_value(value: bool) -> &'static str {
+    if value {
+        "true"
+    } else {
+        "false"
     }
 }
 

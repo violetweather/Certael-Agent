@@ -20,6 +20,13 @@ pub struct IntegritySnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GameProcessSnapshot {
+    pub running: bool,
+    pub executable_matches: bool,
+    pub parent_is_agent: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProtectedBuildFile {
     pub path: String,
     pub size: u64,
@@ -183,6 +190,159 @@ pub fn validate_game_path(path: &Path) -> Result<PathBuf> {
     Ok(canonical)
 }
 
+/// Confirms that the process launched by the Agent is still present and still
+/// refers to the approved executable. The relationship is advisory user-mode
+/// evidence; it is not a trust boundary.
+pub fn inspect_game_process(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    if process_id == 0 {
+        return GameProcessSnapshot {
+            running: false,
+            executable_matches: false,
+            parent_is_agent: None,
+        };
+    }
+    inspect_game_process_platform(process_id, expected_path)
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    let actual = std::fs::read_link(format!("/proc/{process_id}/exe"));
+    let running = actual.is_ok();
+    let executable_matches = actual
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .zip(expected_path.canonicalize().ok())
+        .is_some_and(|(actual, expected)| actual == expected);
+    let parent_is_agent = std::fs::read_to_string(format!("/proc/{process_id}/stat"))
+        .ok()
+        .and_then(|stat| {
+            let after_name = stat.rsplit_once(')')?.1.trim_start();
+            after_name.split_whitespace().nth(1)?.parse::<u32>().ok()
+        })
+        .map(|parent| parent == std::process::id());
+    GameProcessSnapshot {
+        running,
+        executable_matches,
+        parent_is_agent,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    use std::ffi::CStr;
+    unsafe extern "C" {
+        fn proc_pidpath(
+            pid: libc::c_int,
+            buffer: *mut libc::c_void,
+            buffersize: u32,
+        ) -> libc::c_int;
+    }
+    let mut buffer = [0_u8; 4096];
+    let read = unsafe {
+        proc_pidpath(
+            process_id as libc::c_int,
+            buffer.as_mut_ptr().cast(),
+            buffer.len() as u32,
+        )
+    };
+    let actual = (read > 0)
+        .then(|| unsafe { CStr::from_ptr(buffer.as_ptr().cast()) })
+        .and_then(|value| value.to_str().ok())
+        .map(PathBuf::from);
+    let executable_matches = actual
+        .as_ref()
+        .and_then(|path| path.canonicalize().ok())
+        .zip(expected_path.canonicalize().ok())
+        .is_some_and(|(actual, expected)| actual == expected);
+    let parent_is_agent =
+        macos_process_parent(process_id).map(|parent| parent == std::process::id());
+    GameProcessSnapshot {
+        running: actual.is_some(),
+        executable_matches,
+        parent_is_agent,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+                TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    };
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if handle.is_null() {
+        return GameProcessSnapshot {
+            running: false,
+            executable_matches: false,
+            parent_is_agent: None,
+        };
+    }
+    let mut path = vec![0_u16; 32_768];
+    let mut length = path.len() as u32;
+    let queried =
+        unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut length) } != 0;
+    unsafe { CloseHandle(handle) };
+    let executable_matches = queried
+        && windows_paths_equal(
+            Path::new(&String::from_utf16_lossy(&path[..length as usize])),
+            expected_path,
+        );
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    let parent_is_agent = if snapshot == INVALID_HANDLE_VALUE {
+        None
+    } else {
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        let mut found = unsafe { Process32FirstW(snapshot, &mut entry) } != 0;
+        let mut parent = None;
+        while found {
+            if entry.th32ProcessID == process_id {
+                parent = Some(entry.th32ParentProcessID == std::process::id());
+                break;
+            }
+            found = unsafe { Process32NextW(snapshot, &mut entry) } != 0;
+        }
+        unsafe { CloseHandle(snapshot) };
+        parent
+    };
+    GameProcessSnapshot {
+        running: queried,
+        executable_matches,
+        parent_is_agent,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_paths_equal(actual: &Path, expected: &Path) -> bool {
+    let actual = actual
+        .canonicalize()
+        .unwrap_or_else(|_| actual.to_path_buf());
+    let expected = expected
+        .canonicalize()
+        .unwrap_or_else(|_| expected.to_path_buf());
+    actual
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&expected.to_string_lossy())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn inspect_game_process_platform(_process_id: u32, _expected_path: &Path) -> GameProcessSnapshot {
+    GameProcessSnapshot {
+        running: false,
+        executable_matches: false,
+        parent_is_agent: None,
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn debugger_observed() -> bool {
     std::fs::read_to_string("/proc/self/status")
@@ -212,6 +372,58 @@ fn loaded_module_basenames() -> Vec<String> {
         .into_iter()
         .take(1024)
         .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_parent(process_id: u32) -> Option<u32> {
+    #[repr(C)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [libc::c_char; 16],
+        pbi_name: [libc::c_char; 32],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffer_size: libc::c_int,
+        ) -> libc::c_int;
+    }
+    const PROC_PIDTBSDINFO: libc::c_int = 3;
+    let mut info: ProcBsdInfo = unsafe { std::mem::zeroed() };
+    let expected = std::mem::size_of::<ProcBsdInfo>();
+    let read = unsafe {
+        proc_pidinfo(
+            process_id as libc::c_int,
+            PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdInfo).cast(),
+            expected as libc::c_int,
+        )
+    };
+    (read == expected as libc::c_int).then_some(info.pbi_ppid)
 }
 
 #[cfg(target_os = "macos")]
@@ -360,6 +572,15 @@ mod tests {
         assert_eq!(snapshot.executable_sha256.len(), 64);
         assert!(snapshot.executable_size > 0);
         assert!(snapshot.loaded_module_basenames.len() <= 1024);
+    }
+
+    #[test]
+    fn confirms_live_process_executable_identity() {
+        let executable = std::env::current_exe().unwrap();
+        let snapshot = inspect_game_process(std::process::id(), &executable);
+        assert!(snapshot.running);
+        assert!(snapshot.executable_matches);
+        assert_ne!(snapshot.parent_is_agent, Some(true));
     }
     #[test]
     fn rejects_missing_path() {
