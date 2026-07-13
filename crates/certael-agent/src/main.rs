@@ -5,6 +5,7 @@ use certael_agent_protocol::{
 };
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+#[cfg(unix)]
 use prost::Message;
 use rand_core::OsRng;
 use std::{
