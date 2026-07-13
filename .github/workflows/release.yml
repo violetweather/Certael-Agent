@@ -14,23 +14,31 @@ jobs:
         include:
           - os: ubuntu-24.04
             artifact: certael-agent-linux-x86_64
+            target: x86_64-unknown-linux-gnu
           - os: windows-2025
             artifact: certael-agent-windows-x86_64
+            target: x86_64-pc-windows-msvc
           - os: macos-15
             artifact: certael-agent-macos-arm64
+            target: aarch64-apple-darwin
+          - os: macos-15
+            artifact: certael-agent-macos-x86_64
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          targets: ${{ matrix.target }}
       - run: cargo test --workspace --locked
-      - run: cargo build --workspace --release --locked
+      - run: cargo build --workspace --release --locked --target ${{ matrix.target }}
       - name: Package Unix
         if: runner.os != 'Windows'
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/certael-agent dist/
-          cp target/release/libcertael_agent_probe.* dist/ 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/certael-agent" dist/
+          cp target/${{ matrix.target }}/release/libcertael_agent_probe.* dist/ 2>/dev/null || true
           cp README.md LICENSE include/certael_agent_probe.h dist/
           tar -C dist -czf "${{ matrix.artifact }}.tar.gz" .
       - name: Package Windows
@@ -38,8 +46,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
-          Copy-Item target/release/certael-agent.exe dist/
-          Copy-Item target/release/certael_agent_probe.dll dist/
+          Copy-Item "target/${{ matrix.target }}/release/certael-agent.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/certael_agent_probe.dll" dist/
           Copy-Item README.md,LICENSE,include/certael_agent_probe.h dist/
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
