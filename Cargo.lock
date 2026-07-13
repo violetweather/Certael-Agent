@@ -402,6 +402,7 @@ dependencies = [
  "libc",
  "prost",
  "rand_core",
+ "serde",
  "serde_json",
  "sha2",
  "uuid",
@@ -441,6 +442,7 @@ dependencies = [
  "hex",
  "prost",
  "rand_core",
+ "semver",
  "sha2",
  "thiserror 2.0.18",
 ]

@@ -1,5 +1,5 @@
+use crate::runtime::{self, RuntimeState};
 use anyhow::{bail, Context, Result};
-use certael_agent_ipc::{write_frame, Frame, MessageType};
 use std::{
     ffi::OsStr,
     os::windows::{ffi::OsStrExt, io::FromRawHandle},
@@ -21,7 +21,7 @@ use windows_sys::Win32::{
     },
 };
 
-pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
+pub fn launch(game: PathBuf, args: Vec<String>, state: RuntimeState) -> Result<()> {
     let mut security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -99,16 +99,11 @@ pub fn launch(game: PathBuf, args: Vec<String>, hello: Vec<u8>) -> Result<()> {
     drop(game_write);
 
     let mut outbound = unsafe { std::fs::File::from_raw_handle(agent_write.take() as *mut _) };
-    let _inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
-    write_frame(
-        &mut outbound,
-        &Frame {
-            message_type: MessageType::AgentHello,
-            payload: hello,
-        },
-    )
-    .context("failed to bootstrap protected game")?;
+    let mut inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
+    runtime::serve(&mut inbound, &mut outbound, &state)
+        .context("protected Agent session failed")?;
     drop(outbound);
+    drop(inbound);
 
     if unsafe { WaitForSingleObject(process_handle.raw(), INFINITE) } != WAIT_OBJECT_0 {
         bail!("failed while waiting for protected game");
