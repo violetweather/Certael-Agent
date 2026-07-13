@@ -3,15 +3,15 @@ use certael_agent_platform::{inspect_executable, validate_game_path};
 use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
-#[cfg(unix)]
 use prost::Message;
 use rand_core::OsRng;
-use std::{
-    path::PathBuf,
-    process::{Command, Stdio},
-};
+use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 mod ui;
+#[cfg(windows)]
+mod windows_launch;
 
 #[derive(Parser)]
 #[command(
@@ -65,16 +65,7 @@ fn launch(game: PathBuf, args: Vec<String>) -> Result<()> {
     return launch_unix(game, args, hello.encode_to_vec());
     #[cfg(not(unix))]
     {
-        let _ = hello;
-        let status = Command::new(game)
-            .args(args)
-            .stdin(Stdio::null())
-            .status()
-            .context("failed to launch game")?;
-        if !status.success() {
-            bail!("game exited unsuccessfully: {status}");
-        }
-        Ok(())
+        windows_launch::launch(game, args, hello.encode_to_vec())
     }
 }
 
