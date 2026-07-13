@@ -70,6 +70,7 @@ fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> 
     let state = runtime::RuntimeState {
         trust: trust::load(&trust_store)?,
         game: game.clone(),
+        game_process_id: 0,
         key,
         hello,
     };
@@ -83,7 +84,7 @@ fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> 
 }
 
 #[cfg(unix)]
-fn launch_unix(game: PathBuf, args: Vec<String>, state: runtime::RuntimeState) -> Result<()> {
+fn launch_unix(game: PathBuf, args: Vec<String>, mut state: runtime::RuntimeState) -> Result<()> {
     use std::os::fd::{FromRawFd, RawFd};
     let mut fds: [RawFd; 2] = [-1, -1];
     let result = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
@@ -112,6 +113,7 @@ fn launch_unix(game: PathBuf, args: Vec<String>, state: runtime::RuntimeState) -
         .stdin(Stdio::null())
         .spawn()
         .context("failed to launch game")?;
+    state.game_process_id = child.id();
     unsafe {
         libc::close(child_fd);
     }

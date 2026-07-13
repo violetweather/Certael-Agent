@@ -21,7 +21,7 @@ use windows_sys::Win32::{
     },
 };
 
-pub fn launch(game: PathBuf, args: Vec<String>, state: RuntimeState) -> Result<()> {
+pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Result<()> {
     let mut security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: std::ptr::null_mut(),
@@ -95,6 +95,7 @@ pub fn launch(game: PathBuf, args: Vec<String>, state: RuntimeState) -> Result<(
     }
     let process_handle = OwnedHandle(process.hProcess);
     let _thread_handle = OwnedHandle(process.hThread);
+    state.game_process_id = process.dwProcessId;
     drop(game_read);
     drop(game_write);
 

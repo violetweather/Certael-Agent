@@ -15,6 +15,7 @@ use std::{
 
 pub struct RuntimeState {
     pub game: PathBuf,
+    pub game_process_id: u32,
     pub key: SigningKey,
     pub hello: AgentHelloV1,
     pub trust: VerificationKeyRing,
@@ -66,6 +67,8 @@ pub fn serve(reader: &mut impl Read, writer: &mut impl Write, state: &RuntimeSta
                 }
                 let mut observations = vec![
                     observation("agent.platform", &snapshot.platform),
+                    observation("agent.process_id", &std::process::id().to_string()),
+                    observation("game.process_id", &state.game_process_id.to_string()),
                     observation(
                         "agent.debugger_observed",
                         if snapshot.debugger_observed {
@@ -246,6 +249,7 @@ mod tests {
         .unwrap();
         let state = RuntimeState {
             game,
+            game_process_id: 42,
             hello: AgentHelloV1 {
                 protocol_version: 1,
                 agent_version: env!("CARGO_PKG_VERSION").into(),
