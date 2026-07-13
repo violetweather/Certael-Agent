@@ -24,6 +24,6 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
 
 # crates.io 0.31.10 still constrains quick-xml below the patched 0.41 line.
-# Pin the upstream fix until the next wayland-scanner release is published.
+# Keep the released scanner code and patch only that dependency constraint.
 [patch.crates-io]
-wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "672e7cb994883f6d77617308f82a16289f70b9d4" }
+wayland-scanner = { path = "vendor/wayland-scanner-0.31.10" }
