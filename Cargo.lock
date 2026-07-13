@@ -462,6 +462,7 @@ name = "certael-agent-protocol"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "hex",
  "prost",
  "rand_core",
  "sha2",
