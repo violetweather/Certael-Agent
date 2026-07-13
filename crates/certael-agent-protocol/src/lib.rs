@@ -570,4 +570,27 @@ mod tests {
             Err(ProtocolError::NonCanonical)
         );
     }
+
+    #[test]
+    fn golden_policy_vector_is_stable() {
+        let key = SigningKey::from_bytes(&[7; 32]);
+        let claims = AgentPolicyClaimsV1 {
+            protocol_version: 1,
+            policy_id: "competitive".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            requirement_mode: AgentRequirementModeV1::Required as i32,
+            heartbeat_seconds: 15,
+            report_seconds: 60,
+            disconnect_grace_seconds: 30,
+            minimum_agent_version: "1.0.0".into(),
+            expires_at_unix: 1_800_000_000,
+        };
+        let encoded = claims.encode_to_vec();
+        assert_eq!(hex::encode(&encoded), "0801120b636f6d70657469746976651a0467616d65220470726f642802300f383c401e4a05312e302e305080a4a7da06");
+        assert_eq!(
+            hex::encode(key.sign(&[POLICY_DOMAIN, &encoded].concat()).to_bytes()),
+            "2c6e2be8708bf63e9865faa5b7ce261f49c4e85307bf5eaa65a620a8ed1babf852ea261768b233e87dfc0b95402ffb893b3a58b3582624a8cc9b1f9a72d37a08"
+        );
+    }
 }
