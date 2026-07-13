@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use std::collections::BTreeSet;
 use std::{
-    collections::BTreeSet,
     fs::File,
     io::Read,
     path::{Path, PathBuf},

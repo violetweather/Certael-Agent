@@ -1,8 +1,9 @@
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::sync::Mutex;
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
     slice,
-    sync::Mutex,
 };
 
 pub const CERTAEL_PROBE_ABI_VERSION: u32 = 1;
@@ -20,11 +21,14 @@ pub enum CertaelProbeResult {
 }
 
 pub struct CertaelAgentChannel {
+    #[cfg(unix)]
     state: Mutex<ChannelState>,
+    #[cfg(not(unix))]
+    _private: (),
 }
 
+#[cfg(unix)]
 struct ChannelState {
-    #[cfg(unix)]
     file: std::fs::File,
     pending: Option<certael_agent_ipc::Frame>,
 }
@@ -128,21 +132,20 @@ pub unsafe extern "C" fn certael_agent_channel_read(
         {
             return CertaelProbeResult::InvalidArgument;
         }
-        let channel = &*channel;
-        let Ok(mut state) = channel.state.lock() else {
-            return CertaelProbeResult::InternalError;
-        };
-        #[cfg(unix)]
-        if state.pending.is_none() {
-            state.pending = match certael_agent_ipc::read_frame(&mut state.file) {
-                Ok(frame) => Some(frame),
-                Err(_) => return CertaelProbeResult::InvalidFrame,
-            };
-        }
         #[cfg(not(unix))]
         return CertaelProbeResult::UnsupportedPlatform;
         #[cfg(unix)]
         {
+            let channel = &*channel;
+            let Ok(mut state) = channel.state.lock() else {
+                return CertaelProbeResult::InternalError;
+            };
+            if state.pending.is_none() {
+                state.pending = match certael_agent_ipc::read_frame(&mut state.file) {
+                    Ok(frame) => Some(frame),
+                    Err(_) => return CertaelProbeResult::InvalidFrame,
+                };
+            }
             let frame = state.pending.as_ref().expect("pending frame");
             written.write(frame.payload.len());
             message_type.write(frame.message_type as u8);
