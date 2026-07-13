@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/violetweather/Certael-Agent"
-rust-version = "1.85"
+rust-version = "1.92"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -22,3 +22,8 @@ sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+
+# crates.io 0.31.10 still constrains quick-xml below the patched 0.41 line.
+# Pin the upstream fix until the next wayland-scanner release is published.
+[patch.crates-io]
+wayland-scanner = { git = "https://github.com/Smithay/wayland-rs", rev = "672e7cb994883f6d77617308f82a16289f70b9d4" }

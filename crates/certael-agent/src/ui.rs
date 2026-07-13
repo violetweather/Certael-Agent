@@ -30,8 +30,8 @@ impl Default for AgentApp {
 }
 
 impl eframe::App for AgentApp {
-    fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(context, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| {
             ui.heading("Certael Agent");
             ui.add_space(8.0);
             ui.label(self.status);
@@ -54,7 +54,7 @@ impl eframe::App for AgentApp {
             ui.label("Offline games never require Certael Agent.");
             ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
                 if ui.button("Exit").clicked() {
-                    context.send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                 }
                 ui.label(format!("Version {} (pre-1.0)", env!("CARGO_PKG_VERSION")));
             });

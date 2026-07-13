@@ -11,7 +11,7 @@ certael-agent-platform = { path = "../certael-agent-platform" }
 certael-agent-protocol = { path = "../certael-agent-protocol" }
 clap = { version = "4", features = ["derive"] }
 ed25519-dalek.workspace = true
-eframe = { version = "0.31.1", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.35.0", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
 hex.workspace = true
 prost.workspace = true
 rand_core.workspace = true
