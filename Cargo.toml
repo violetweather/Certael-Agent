@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
 members = ["crates/certael-agent-protocol", "crates/certael-agent-platform", "crates/certael-agent-session", "crates/certael-agent-ipc", "crates/certael-agent-updater", "crates/certael-agent", "crates/certael-agent-probe"]
+exclude = ["vendor/wayland-scanner-0.31.10"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/violetweather/Certael-Agent"
-rust-version = "1.85"
+rust-version = "1.92"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -22,3 +23,8 @@ sha2 = "0.10"
 thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1"
+
+# crates.io 0.31.10 still constrains quick-xml below the patched 0.41 line.
+# Keep the released scanner code and patch only that dependency constraint.
+[patch.crates-io]
+wayland-scanner = { path = "vendor/wayland-scanner-0.31.10" }

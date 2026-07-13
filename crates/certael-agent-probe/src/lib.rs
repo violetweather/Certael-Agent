@@ -1,5 +1,5 @@
 use sha2::{Digest, Sha256};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::sync::Mutex;
 use std::{
     panic::{catch_unwind, AssertUnwindSafe},
@@ -21,15 +21,20 @@ pub enum CertaelProbeResult {
 }
 
 pub struct CertaelAgentChannel {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     state: Mutex<ChannelState>,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     _private: (),
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 struct ChannelState {
+    #[cfg(unix)]
     file: std::fs::File,
+    #[cfg(windows)]
+    read_file: std::fs::File,
+    #[cfg(windows)]
+    write_file: std::fs::File,
     pending: Option<certael_agent_ipc::Frame>,
 }
 
@@ -101,7 +106,36 @@ pub unsafe extern "C" fn certael_agent_channel_open(
             output.write(Box::into_raw(channel));
             CertaelProbeResult::Ok
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::FromRawHandle;
+            let (Ok(raw_read), Ok(raw_write)) = (
+                std::env::var("CERTAEL_AGENT_READ_HANDLE"),
+                std::env::var("CERTAEL_AGENT_WRITE_HANDLE"),
+            ) else {
+                return CertaelProbeResult::NotConnected;
+            };
+            let (Ok(read_handle), Ok(write_handle)) =
+                (raw_read.parse::<usize>(), raw_write.parse::<usize>())
+            else {
+                return CertaelProbeResult::NotConnected;
+            };
+            if read_handle == 0 || write_handle == 0 || read_handle == write_handle {
+                return CertaelProbeResult::NotConnected;
+            }
+            std::env::remove_var("CERTAEL_AGENT_READ_HANDLE");
+            std::env::remove_var("CERTAEL_AGENT_WRITE_HANDLE");
+            let channel = Box::new(CertaelAgentChannel {
+                state: Mutex::new(ChannelState {
+                    read_file: std::fs::File::from_raw_handle(read_handle as *mut _),
+                    write_file: std::fs::File::from_raw_handle(write_handle as *mut _),
+                    pending: None,
+                }),
+            });
+            output.write(Box::into_raw(channel));
+            CertaelProbeResult::Ok
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             output.write(std::ptr::null_mut());
             CertaelProbeResult::UnsupportedPlatform
@@ -132,16 +166,20 @@ pub unsafe extern "C" fn certael_agent_channel_read(
         {
             return CertaelProbeResult::InvalidArgument;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         return CertaelProbeResult::UnsupportedPlatform;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let channel = &*channel;
             let Ok(mut state) = channel.state.lock() else {
                 return CertaelProbeResult::InternalError;
             };
             if state.pending.is_none() {
-                state.pending = match certael_agent_ipc::read_frame(&mut state.file) {
+                #[cfg(unix)]
+                let result = certael_agent_ipc::read_frame(&mut state.file);
+                #[cfg(windows)]
+                let result = certael_agent_ipc::read_frame(&mut state.read_file);
+                state.pending = match result {
                     Ok(frame) => Some(frame),
                     Err(_) => return CertaelProbeResult::InvalidFrame,
                 };
@@ -184,9 +222,9 @@ pub unsafe extern "C" fn certael_agent_channel_write(
         if payload_len > certael_agent_ipc::MAX_FRAME_PAYLOAD {
             return CertaelProbeResult::InvalidArgument;
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         return CertaelProbeResult::UnsupportedPlatform;
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let channel = &*channel;
             let Ok(mut state) = channel.state.lock() else {
@@ -201,7 +239,11 @@ pub unsafe extern "C" fn certael_agent_channel_write(
                 message_type,
                 payload: payload.to_vec(),
             };
-            match certael_agent_ipc::write_frame(&mut state.file, &frame) {
+            #[cfg(unix)]
+            let result = certael_agent_ipc::write_frame(&mut state.file, &frame);
+            #[cfg(windows)]
+            let result = certael_agent_ipc::write_frame(&mut state.write_file, &frame);
+            match result {
                 Ok(()) => CertaelProbeResult::Ok,
                 Err(_) => CertaelProbeResult::InvalidFrame,
             }
