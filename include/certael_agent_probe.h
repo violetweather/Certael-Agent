@@ -23,6 +23,10 @@ certael_probe_result certael_agent_channel_read(certael_agent_channel *channel,
                                                 uint8_t *message_type,
                                                 uint8_t *output, size_t capacity,
                                                 size_t *written);
+certael_probe_result certael_agent_channel_write(certael_agent_channel *channel,
+                                                 uint8_t message_type,
+                                                 const uint8_t *payload,
+                                                 size_t payload_len);
 void certael_agent_channel_destroy(certael_agent_channel *channel);
 #ifdef __cplusplus
 }

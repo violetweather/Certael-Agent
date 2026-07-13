@@ -152,9 +152,59 @@ pub unsafe extern "C" fn certael_agent_channel_read(
             if capacity < frame.payload.len() {
                 return CertaelProbeResult::BufferTooSmall;
             }
-            std::ptr::copy_nonoverlapping(frame.payload.as_ptr(), output, frame.payload.len());
+            if !frame.payload.is_empty() {
+                std::ptr::copy_nonoverlapping(frame.payload.as_ptr(), output, frame.payload.len());
+            }
             state.pending = None;
             CertaelProbeResult::Ok
+        }
+    }))
+    .unwrap_or(CertaelProbeResult::InternalError)
+}
+
+/// Writes one typed frame to the Agent channel.
+///
+/// # Safety
+/// `channel` must be live. When `payload_len` is nonzero, `payload` must point
+/// to `payload_len` readable bytes for the duration of the call.
+#[no_mangle]
+pub unsafe extern "C" fn certael_agent_channel_write(
+    channel: *mut CertaelAgentChannel,
+    message_type: u8,
+    payload: *const u8,
+    payload_len: usize,
+) -> CertaelProbeResult {
+    catch_unwind(AssertUnwindSafe(|| {
+        if channel.is_null() || (payload_len > 0 && payload.is_null()) {
+            return CertaelProbeResult::InvalidArgument;
+        }
+        let Ok(message_type) = certael_agent_ipc::MessageType::try_from(message_type) else {
+            return CertaelProbeResult::InvalidArgument;
+        };
+        if payload_len > certael_agent_ipc::MAX_FRAME_PAYLOAD {
+            return CertaelProbeResult::InvalidArgument;
+        }
+        #[cfg(not(unix))]
+        return CertaelProbeResult::UnsupportedPlatform;
+        #[cfg(unix)]
+        {
+            let channel = &*channel;
+            let Ok(mut state) = channel.state.lock() else {
+                return CertaelProbeResult::InternalError;
+            };
+            let payload = if payload_len == 0 {
+                &[]
+            } else {
+                slice::from_raw_parts(payload, payload_len)
+            };
+            let frame = certael_agent_ipc::Frame {
+                message_type,
+                payload: payload.to_vec(),
+            };
+            match certael_agent_ipc::write_frame(&mut state.file, &frame) {
+                Ok(()) => CertaelProbeResult::Ok,
+                Err(_) => CertaelProbeResult::InvalidFrame,
+            }
         }
     }))
     .unwrap_or(CertaelProbeResult::InternalError)
@@ -243,6 +293,21 @@ mod tests {
         );
         assert_eq!(message_type, MessageType::AgentHello as u8);
         assert_eq!(complete, [1, 2, 3, 4]);
+        let response = [8_u8, 9];
+        assert_eq!(
+            unsafe {
+                certael_agent_channel_write(
+                    channel,
+                    MessageType::Challenge as u8,
+                    response.as_ptr(),
+                    response.len(),
+                )
+            },
+            CertaelProbeResult::Ok
+        );
+        let received = certael_agent_ipc::read_frame(&mut writer).unwrap();
+        assert_eq!(received.message_type, MessageType::Challenge);
+        assert_eq!(received.payload, response);
         unsafe { certael_agent_channel_destroy(channel) };
     }
 }
