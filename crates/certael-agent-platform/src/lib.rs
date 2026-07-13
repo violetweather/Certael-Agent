@@ -19,6 +19,123 @@ pub struct IntegritySnapshot {
     pub loaded_module_basenames: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedBuildFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProtectedBuildManifest {
+    pub build_id: String,
+    pub files: Vec<ProtectedBuildFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestMismatch {
+    pub path: String,
+    pub reason: &'static str,
+}
+
+pub fn verify_build_manifest(
+    root: &Path,
+    manifest: &ProtectedBuildManifest,
+) -> Result<Vec<ManifestMismatch>> {
+    let canonical_root = root.canonicalize().context("game root does not exist")?;
+    if !canonical_root.is_dir()
+        || manifest.build_id.is_empty()
+        || manifest.build_id.len() > 128
+        || manifest.files.is_empty()
+        || manifest.files.len() > 16_384
+    {
+        bail!("build manifest is invalid");
+    }
+    let mut seen = BTreeSet::new();
+    let mut mismatches = Vec::new();
+    for expected in &manifest.files {
+        if !safe_relative_path(&expected.path)
+            || expected.sha256.len() != 64
+            || !expected
+                .sha256
+                .bytes()
+                .all(|value| value.is_ascii_hexdigit())
+            || !seen.insert(expected.path.clone())
+        {
+            bail!("build manifest contains an invalid file entry");
+        }
+        let candidate = canonical_root.join(&expected.path);
+        let Ok(link_metadata) = std::fs::symlink_metadata(&candidate) else {
+            mismatches.push(ManifestMismatch {
+                path: expected.path.clone(),
+                reason: "MISSING",
+            });
+            continue;
+        };
+        if link_metadata.file_type().is_symlink() || !link_metadata.is_file() {
+            mismatches.push(ManifestMismatch {
+                path: expected.path.clone(),
+                reason: "UNSAFE_TYPE",
+            });
+            continue;
+        }
+        let canonical = candidate
+            .canonicalize()
+            .context("cannot resolve protected file")?;
+        if !canonical.starts_with(&canonical_root) {
+            mismatches.push(ManifestMismatch {
+                path: expected.path.clone(),
+                reason: "PATH_ESCAPE",
+            });
+            continue;
+        }
+        if link_metadata.len() != expected.size {
+            mismatches.push(ManifestMismatch {
+                path: expected.path.clone(),
+                reason: "SIZE_MISMATCH",
+            });
+            continue;
+        }
+        let actual = hash_file(&canonical)?;
+        if !actual.eq_ignore_ascii_case(&expected.sha256) {
+            mismatches.push(ManifestMismatch {
+                path: expected.path.clone(),
+                reason: "HASH_MISMATCH",
+            });
+        }
+    }
+    Ok(mismatches)
+}
+
+fn safe_relative_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.is_empty()
+        && value.len() <= 512
+        && !path.is_absolute()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).context("cannot open protected file")?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = file
+            .read(&mut buffer)
+            .context("cannot hash protected file")?;
+        if count == 0 {
+            break;
+        }
+        hasher.update(&buffer[..count]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
 pub fn inspect_executable(path: &Path) -> Result<IntegritySnapshot> {
     let canonical = path
         .canonicalize()
@@ -164,5 +281,44 @@ mod tests {
     #[test]
     fn rejects_missing_path() {
         assert!(validate_game_path(Path::new("definitely-not-a-game")).is_err());
+    }
+
+    #[test]
+    fn verifies_manifest_and_reports_tampering() {
+        let root = std::env::temp_dir().join(format!("certael-manifest-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("game.bin"), b"approved").unwrap();
+        let expected = ProtectedBuildManifest {
+            build_id: "build-1".into(),
+            files: vec![ProtectedBuildFile {
+                path: "game.bin".into(),
+                size: 8,
+                sha256: hash_file(&root.join("game.bin")).unwrap(),
+            }],
+        };
+        assert!(verify_build_manifest(&root, &expected).unwrap().is_empty());
+        std::fs::write(root.join("game.bin"), b"tampered").unwrap();
+        assert_eq!(
+            verify_build_manifest(&root, &expected).unwrap(),
+            vec![ManifestMismatch {
+                path: "game.bin".into(),
+                reason: "HASH_MISMATCH",
+            }]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rejects_manifest_path_traversal() {
+        let manifest = ProtectedBuildManifest {
+            build_id: "build".into(),
+            files: vec![ProtectedBuildFile {
+                path: "../outside".into(),
+                size: 1,
+                sha256: "00".repeat(32),
+            }],
+        };
+        assert!(verify_build_manifest(Path::new("."), &manifest).is_err());
     }
 }
