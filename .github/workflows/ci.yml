@@ -20,6 +20,7 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test --manifest-path vendor/wayland-scanner-0.31.10/Cargo.toml
 
   dependency-audit:
     runs-on: ubuntu-24.04
