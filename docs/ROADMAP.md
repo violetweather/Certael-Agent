@@ -11,10 +11,11 @@ This repository remains pre-1.0 until every gate has published evidence.
 - [x] Revocable signing-key ring and canonical signed policy verification
 - [x] Short-lived launch-grant verification bound to Agent key and policy digest
 - [x] Fresh one-time challenge handling and chained signed report state
+- [x] TUF metadata rotation, expiration, rollback, and target verification library
 - [ ] Restricted inherited Windows named-pipe implementation
 - [ ] Production network launch-grant redemption and challenge transport
 - [ ] Signed immutable policy lifecycle
-- [ ] TUF-style updater with offline root ceremony
+- [ ] Atomic platform installer and exercised offline 2-of-3 TUF root ceremony
 - [ ] Windows Authenticode validation and process mitigations
 - [ ] macOS Developer ID, notarization, hardened-runtime, and Mach-O checks
 - [ ] Linux ELF build-ID and pidfd checks
