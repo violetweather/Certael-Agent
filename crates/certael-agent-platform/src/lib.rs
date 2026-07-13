@@ -216,7 +216,55 @@ fn loaded_module_basenames() -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn debugger_observed() -> bool {
-    false
+    #[repr(C)]
+    struct ProcBsdInfo {
+        pbi_flags: u32,
+        pbi_status: u32,
+        pbi_xstatus: u32,
+        pbi_pid: u32,
+        pbi_ppid: u32,
+        pbi_uid: u32,
+        pbi_gid: u32,
+        pbi_ruid: u32,
+        pbi_rgid: u32,
+        pbi_svuid: u32,
+        pbi_svgid: u32,
+        rfu_1: u32,
+        pbi_comm: [libc::c_char; 16],
+        pbi_name: [libc::c_char; 32],
+        pbi_nfiles: u32,
+        pbi_pgid: u32,
+        pbi_pjobc: u32,
+        e_tdev: u32,
+        e_tpgid: u32,
+        pbi_nice: i32,
+        pbi_start_tvsec: u64,
+        pbi_start_tvusec: u64,
+    }
+    #[link(name = "proc")]
+    unsafe extern "C" {
+        fn proc_pidinfo(
+            pid: libc::c_int,
+            flavor: libc::c_int,
+            arg: u64,
+            buffer: *mut libc::c_void,
+            buffer_size: libc::c_int,
+        ) -> libc::c_int;
+    }
+    const PROC_PIDTBSDINFO: libc::c_int = 3;
+    const PROC_FLAG_TRACED: u32 = 2;
+    let mut info: ProcBsdInfo = unsafe { std::mem::zeroed() };
+    let expected = std::mem::size_of::<ProcBsdInfo>();
+    let read = unsafe {
+        proc_pidinfo(
+            libc::getpid(),
+            PROC_PIDTBSDINFO,
+            0,
+            (&mut info as *mut ProcBsdInfo).cast(),
+            expected as libc::c_int,
+        )
+    };
+    read == expected as libc::c_int && info.pbi_flags & PROC_FLAG_TRACED != 0
 }
 
 #[cfg(target_os = "macos")]
@@ -252,9 +300,44 @@ fn debugger_observed() -> bool {
 
 #[cfg(target_os = "windows")]
 fn loaded_module_basenames() -> Vec<String> {
-    // Windows module enumeration is implemented by the signed platform adapter;
-    // the portable core returns no module claims rather than guessing.
-    vec![]
+    use windows_sys::Win32::{
+        Foundation::HMODULE,
+        System::{
+            ProcessStatus::{K32EnumProcessModules, K32GetModuleBaseNameW},
+            Threading::GetCurrentProcess,
+        },
+    };
+    let process = unsafe { GetCurrentProcess() };
+    let mut needed = 0_u32;
+    unsafe { K32EnumProcessModules(process, std::ptr::null_mut(), 0, &mut needed) };
+    if needed == 0 {
+        return vec![];
+    }
+    let count = (needed as usize / std::mem::size_of::<HMODULE>()).min(1024);
+    let mut modules = vec![std::ptr::null_mut(); count];
+    if unsafe {
+        K32EnumProcessModules(
+            process,
+            modules.as_mut_ptr(),
+            (modules.len() * std::mem::size_of::<HMODULE>()) as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return vec![];
+    }
+    modules
+        .into_iter()
+        .filter_map(|module| {
+            let mut name = [0_u16; 256];
+            let length = unsafe {
+                K32GetModuleBaseNameW(process, module, name.as_mut_ptr(), name.len() as u32)
+            } as usize;
+            (length > 0 && length < name.len()).then(|| String::from_utf16_lossy(&name[..length]))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]

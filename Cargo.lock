@@ -422,8 +422,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hex",
+ "libc",
  "serde",
  "sha2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
