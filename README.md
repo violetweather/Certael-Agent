@@ -4,7 +4,25 @@ Certael Agent is the optional user-mode integrity companion for [Certael](https:
 
 The Agent is pre-1.0. It has no kernel driver, does not make a client trustworthy, and never authorizes gameplay state. Its evidence is advisory and must be combined with server-authoritative validation.
 
-## Current developer build
+## Install a prebuilt release
+
+Normal players and game developers do not need Rust or a native compiler.
+Extract the archive for the computer, obtain the game operator's public
+`trust-store.json`, then run the included installer as an administrator:
+
+```powershell
+.\install\install.ps1 -TrustStore C:\path\to\trust-store.json
+```
+
+```bash
+sudo ./install/install.sh --trust-store /path/to/trust-store.json
+```
+
+See [the complete installation guide](docs/INSTALLING.md), including installed
+paths, launch commands, upgrades, and uninstall behavior. Verified staged
+updates and rollback are documented in [the secure update guide](docs/UPDATES.md).
+
+## Build from source
 
 ```bash
 cargo test --workspace
@@ -13,7 +31,13 @@ cargo run -p certael-agent -- launch --game /path/to/game \
   --trust-store /path/to/certael-agent-trust.json -- --game-argument
 ```
 
-The trust store pins the game operator's Ed25519 Agent signing roots. It is installed outside the game-writable directory and must not be group- or world-writable on Unix:
+Run the complete local format, lint, test, release-build, installer, launcher,
+and trust-store smoke suite with `./scripts/verify-local.sh` on macOS or Linux.
+
+The trust store pins the game operator's Ed25519 Agent signing roots. Start from
+[`examples/trust-store.example.json`](examples/trust-store.example.json), replace
+the example public key and validity window, and install it outside the
+game-writable directory. It must not be group- or world-writable on Unix:
 
 ```json
 {

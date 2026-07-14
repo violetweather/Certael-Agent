@@ -2,6 +2,7 @@
 #define CERTAEL_AGENT_PROBE_H
 #include <stddef.h>
 #include <stdint.h>
+#define CERTAEL_PROBE_ABI_VERSION_1 1u
 #ifdef __cplusplus
 extern "C" {
 #endif

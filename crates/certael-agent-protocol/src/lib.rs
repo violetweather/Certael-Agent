@@ -38,6 +38,8 @@ pub struct AgentPolicyClaimsV1 {
     pub minimum_agent_version: String,
     #[prost(int64, tag = "10")]
     pub expires_at_unix: i64,
+    #[prost(string, tag = "11")]
+    pub tenant_id: String,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -307,6 +309,7 @@ pub fn verify_launch_bundle(
         .map_err(|_| ProtocolError::InvalidField("current_agent_version"))?;
     if grant.agent_public_key.as_slice() != expected_agent_public_key
         || grant.build_id != expected_build_id
+        || policy.tenant_id != grant.tenant_id
         || policy.game_id != grant.game_id
         || policy.environment_id != grant.environment_id
         || grant.policy_digest.as_slice() != Sha256::digest(&bundle.signed_policy).as_slice()
@@ -375,6 +378,7 @@ fn verify_signed_bytes(
 fn validate_policy(claims: &AgentPolicyClaimsV1, now_unix: i64) -> Result<(), ProtocolError> {
     if claims.protocol_version != PROTOCOL_VERSION
         || !identifier(&claims.policy_id)
+        || !identifier(&claims.tenant_id)
         || !identifier(&claims.game_id)
         || !identifier(&claims.environment_id)
         || AgentRequirementModeV1::try_from(claims.requirement_mode).is_err()
@@ -601,6 +605,7 @@ mod tests {
         let claims = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "competitive-default".into(),
+            tenant_id: "tenant-1".into(),
             game_id: "game-1".into(),
             environment_id: "prod".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,
@@ -643,6 +648,7 @@ mod tests {
         let policy_claims = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "competitive".into(),
+            tenant_id: "tenant".into(),
             game_id: "game".into(),
             environment_id: "prod".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,
@@ -689,7 +695,7 @@ mod tests {
         .encode_to_vec();
         let bundle = AgentLaunchBundleV1 {
             signed_policy: policy,
-            signed_launch_grant: grant,
+            signed_launch_grant: grant.clone(),
         }
         .encode_to_vec();
         assert_eq!(
@@ -712,6 +718,51 @@ mod tests {
                 1_700_000_001,
                 &agent.verifying_key().to_bytes(),
                 "other-build",
+                "0.1.0",
+            ),
+            Err(ProtocolError::InvalidField("launch_binding"))
+        );
+
+        let other_tenant_claims = AgentPolicyClaimsV1 {
+            tenant_id: "other-tenant".into(),
+            ..policy_claims
+        };
+        let other_tenant_bytes = other_tenant_claims.encode_to_vec();
+        let other_tenant_policy = SignedAgentPolicyV1 {
+            signature: root
+                .sign(&[POLICY_DOMAIN, &other_tenant_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: other_tenant_bytes,
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let mismatch_grant_claims = AgentLaunchGrantClaimsV1 {
+            policy_digest: Sha256::digest(&other_tenant_policy).to_vec(),
+            ..grant_claims
+        };
+        let mismatch_grant_bytes = mismatch_grant_claims.encode_to_vec();
+        let mismatch_grant = SignedAgentLaunchGrantV1 {
+            signature: root
+                .sign(&[LAUNCH_DOMAIN, &mismatch_grant_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: mismatch_grant_bytes,
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let mismatched_bundle = AgentLaunchBundleV1 {
+            signed_policy: other_tenant_policy,
+            signed_launch_grant: mismatch_grant,
+        }
+        .encode_to_vec();
+        assert_eq!(
+            verify_launch_bundle(
+                &mismatched_bundle,
+                &key_ring(&root),
+                1_700_000_001,
+                &agent.verifying_key().to_bytes(),
+                "build",
                 "0.1.0",
             ),
             Err(ProtocolError::InvalidField("launch_binding"))
@@ -743,6 +794,7 @@ mod tests {
         let claims = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "competitive".into(),
+            tenant_id: "tenant".into(),
             game_id: "game".into(),
             environment_id: "prod".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,
@@ -753,10 +805,10 @@ mod tests {
             expires_at_unix: 1_800_000_000,
         };
         let encoded = claims.encode_to_vec();
-        assert_eq!(hex::encode(&encoded), "0801120b636f6d70657469746976651a0467616d65220470726f642802300f383c401e4a05312e302e305080a4a7da06");
+        assert_eq!(hex::encode(&encoded), "0801120b636f6d70657469746976651a0467616d65220470726f642802300f383c401e4a05312e302e305080a4a7da065a0674656e616e74");
         assert_eq!(
             hex::encode(key.sign(&[POLICY_DOMAIN, &encoded].concat()).to_bytes()),
-            "2c6e2be8708bf63e9865faa5b7ce261f49c4e85307bf5eaa65a620a8ed1babf852ea261768b233e87dfc0b95402ffb893b3a58b3582624a8cc9b1f9a72d37a08"
+            "7cbfbe7094e668b794c064f9a9d7828af08d17951afa92411088cca17a4030d4cfac746a991e2a203134b7abc547a409f3429c4ecc4b3651b48648c28af3df0b"
         );
     }
 
@@ -766,6 +818,7 @@ mod tests {
         let policy_claims = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "competitive".into(),
+            tenant_id: "tenant".into(),
             game_id: "game".into(),
             environment_id: "prod".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,
@@ -801,6 +854,6 @@ mod tests {
             authoritative_server_id: "server".into(),
         };
         let encoded = claims.encode_to_vec();
-        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa0662201cbfc3cdcad1c8675ee33a31ca90bbefe6e5bab3dec0264f786495f11915a0456a06736572766572");
+        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa066220947cc7a0c10233b2ff5c0aae415b2e37cfc97915e5747edcc3eb8245f600f4406a06736572766572");
     }
 }

@@ -1,6 +1,10 @@
 use anyhow::{bail, Context, Result};
 use certael_agent_platform::{inspect_executable, validate_game_path};
 use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
+use certael_agent_updater::{
+    activate_pending, read_activation_state, recover, register_existing_version, rollback,
+    verify_stage_and_install, InstallConfig, UpdateConfig,
+};
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use rand_core::OsRng;
@@ -8,6 +12,7 @@ use std::path::PathBuf;
 #[cfg(unix)]
 use std::process::{Command, Stdio};
 
+mod hardening;
 mod runtime;
 mod trust;
 mod ui;
@@ -25,10 +30,15 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Commands {
     Inspect {
         #[arg(long)]
         game: PathBuf,
+    },
+    ValidateTrustStore {
+        #[arg(long)]
+        trust_store: PathBuf,
     },
     Launch {
         #[arg(long)]
@@ -38,22 +48,145 @@ enum Commands {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    Update {
+        #[arg(long)]
+        trusted_root: PathBuf,
+        #[arg(long)]
+        metadata_url: String,
+        #[arg(long)]
+        targets_url: String,
+        #[arg(long)]
+        datastore: PathBuf,
+        #[arg(long)]
+        staging: PathBuf,
+        #[arg(long)]
+        install_root: PathBuf,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        target_name: String,
+        #[arg(long, default_value = platform_agent_name())]
+        installed_name: String,
+    },
+    ActivateUpdate {
+        #[arg(long)]
+        install_root: PathBuf,
+    },
+    RollbackUpdate {
+        #[arg(long)]
+        install_root: PathBuf,
+    },
+    RecoverUpdate {
+        #[arg(long)]
+        install_root: PathBuf,
+    },
+    UpdateStatus {
+        #[arg(long)]
+        install_root: PathBuf,
+    },
+    #[command(hide = true)]
+    RegisterInstalledVersion {
+        #[arg(long)]
+        install_root: PathBuf,
+        #[arg(long)]
+        version: String,
+        #[arg(long, default_value = platform_agent_name())]
+        installed_name: String,
+        #[arg(long)]
+        activate: bool,
+    },
 }
 
 fn main() -> Result<()> {
+    hardening::apply()?;
     match Cli::parse().command {
         Some(Commands::Inspect { game }) => println!(
             "{}",
             serde_json::to_string_pretty(&inspect_executable(&game)?)?
         ),
+        Some(Commands::ValidateTrustStore { trust_store }) => {
+            trust::load(&trust_store)?;
+            println!("Agent trust store is valid");
+        }
         Some(Commands::Launch {
             game,
             trust_store,
             args,
         }) => launch(game, trust_store, args)?,
+        Some(Commands::Update {
+            trusted_root,
+            metadata_url,
+            targets_url,
+            datastore,
+            staging,
+            install_root,
+            version,
+            target_name,
+            installed_name,
+        }) => {
+            let runtime = tokio::runtime::Runtime::new()?;
+            let installed = runtime.block_on(verify_stage_and_install(
+                &UpdateConfig {
+                    trusted_root,
+                    metadata_base_url: url::Url::parse(&metadata_url)
+                        .context("invalid metadata URL")?,
+                    targets_base_url: url::Url::parse(&targets_url)
+                        .context("invalid targets URL")?,
+                    datastore,
+                    staging_directory: staging,
+                    target_name,
+                },
+                &InstallConfig {
+                    install_root,
+                    version,
+                    installed_name,
+                },
+            ))?;
+            println!("verified update staged at {}", installed.display());
+        }
+        Some(Commands::ActivateUpdate { install_root }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&activate_pending(&install_root)?)?
+            );
+        }
+        Some(Commands::RollbackUpdate { install_root }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rollback(&install_root)?)?
+            );
+        }
+        Some(Commands::RecoverUpdate { install_root }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&recover(&install_root)?)?
+            );
+        }
+        Some(Commands::UpdateStatus { install_root }) => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&read_activation_state(&install_root)?)?
+            );
+        }
+        Some(Commands::RegisterInstalledVersion {
+            install_root,
+            version,
+            installed_name,
+            activate,
+        }) => {
+            register_existing_version(&install_root, &version, &installed_name, activate)?;
+        }
         None => ui::run()?,
     }
     Ok(())
+}
+
+const fn platform_agent_name() -> &'static str {
+    if cfg!(windows) {
+        "certael-agent.exe"
+    } else {
+        "certael-agent"
+    }
 }
 
 fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> {
@@ -141,4 +274,52 @@ fn hex_to_32(value: &str) -> Result<Vec<u8>> {
                 .context("invalid SHA-256 digest")
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use certael_agent_ipc::IPC_VERSION;
+    use certael_agent_probe::CERTAEL_PROBE_ABI_VERSION;
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    struct CompatibilityManifest {
+        schema_version: u32,
+        product: String,
+        product_version: String,
+        agent_protocol_version: u32,
+        local_ipc_version: u8,
+        probe_abi_version: u32,
+        compatible_core_agent_protocol_versions: Vec<u32>,
+        supported_player_targets: Vec<String>,
+    }
+
+    #[test]
+    fn release_compatibility_manifest_matches_the_implementation() {
+        let manifest: CompatibilityManifest = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../release/compatibility-v1.json"
+        )))
+        .expect("compatibility-v1.json must be valid JSON");
+
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.product, "certael-agent");
+        assert_eq!(manifest.product_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(manifest.agent_protocol_version, PROTOCOL_VERSION);
+        assert_eq!(manifest.local_ipc_version, IPC_VERSION);
+        assert_eq!(manifest.probe_abi_version, CERTAEL_PROBE_ABI_VERSION);
+        assert!(manifest
+            .compatible_core_agent_protocol_versions
+            .contains(&PROTOCOL_VERSION));
+        assert_eq!(
+            manifest.supported_player_targets,
+            [
+                "x86_64-pc-windows-msvc",
+                "x86_64-unknown-linux-gnu",
+                "aarch64-apple-darwin",
+                "x86_64-apple-darwin",
+            ]
+        );
+    }
 }

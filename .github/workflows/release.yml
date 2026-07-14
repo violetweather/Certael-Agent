@@ -27,8 +27,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
         with:
+          toolchain: 1.97.0
           targets: ${{ matrix.target }}
       - run: cargo test --workspace --locked
       - run: cargo build --workspace --release --locked --target ${{ matrix.target }}
@@ -38,18 +40,48 @@ jobs:
         run: |
           mkdir -p dist
           cp "target/${{ matrix.target }}/release/certael-agent" dist/
+          cp "target/${{ matrix.target }}/release/certael-agent-launcher" dist/
           cp target/${{ matrix.target }}/release/libcertael_agent_probe.* dist/ 2>/dev/null || true
-          cp README.md LICENSE include/certael_agent_probe.h dist/
+          cp README.md LICENSE include/certael_agent_probe.h release/compatibility-v1.json dist/
+          cp -R install dist/
+          cp -R examples dist/
+          mkdir -p dist/docs
+          cp docs/INSTALLING.md docs/UPDATES.md docs/TUF-CEREMONY.md dist/docs/
           tar -C dist -czf "${{ matrix.artifact }}.tar.gz" .
+      - name: Smoke packaged Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_dir="$(mktemp -d)"
+          tar -xzf "${{ matrix.artifact }}.tar.gz" -C "$test_dir"
+          test -s "$test_dir/compatibility-v1.json"
+          test -s "$test_dir/certael_agent_probe.h"
+          "$test_dir/certael-agent" --help
+          test -x "$test_dir/certael-agent-launcher"
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist
           Copy-Item "target/${{ matrix.target }}/release/certael-agent.exe" dist/
+          Copy-Item "target/${{ matrix.target }}/release/certael-agent-launcher.exe" dist/
           Copy-Item "target/${{ matrix.target }}/release/certael_agent_probe.dll" dist/
-          Copy-Item README.md,LICENSE,include/certael_agent_probe.h dist/
+          Copy-Item README.md,LICENSE,include/certael_agent_probe.h,release/compatibility-v1.json dist/
+          Copy-Item install -Destination dist/install -Recurse
+          Copy-Item examples -Destination dist/examples -Recurse
+          New-Item -ItemType Directory -Force dist/docs
+          Copy-Item docs/INSTALLING.md,docs/UPDATES.md,docs/TUF-CEREMONY.md dist/docs/
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
+      - name: Smoke packaged Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Expand-Archive "${{ matrix.artifact }}.zip" -DestinationPath smoke
+          if (-not (Test-Path smoke/compatibility-v1.json -PathType Leaf)) { throw "compatibility manifest is missing" }
+          if (-not (Test-Path smoke/certael_agent_probe.h -PathType Leaf)) { throw "probe header is missing" }
+          & smoke/certael-agent.exe --help
+          if (-not (Test-Path smoke/certael-agent-launcher.exe -PathType Leaf)) { throw "launcher is missing" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.artifact }}
@@ -68,6 +100,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with: { persist-credentials: false }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with: { toolchain: 1.97.0 }
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: certael-agent-*
@@ -77,9 +110,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx --format json --spec-version 1.5 --target all
-          find . -path '*/target' -prune -o -name bom.json -print0 | \
-            tar --null -czf "release/certael-agent-sbom-${GITHUB_REF_NAME}.tar.gz" --files-from=-
+          bash scripts/package-sbom.sh "release/certael-agent-sbom-${GITHUB_REF_NAME}.tar.gz"
       - name: Checksums
         run: (cd release && sha256sum * > checksums-sha256.txt)
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2

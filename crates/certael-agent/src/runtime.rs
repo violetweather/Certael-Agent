@@ -92,12 +92,35 @@ pub fn serve(reader: &mut impl Read, writer: &mut impl Write, state: &RuntimeSta
                     ),
                     observation("agent.probe_health", "connected"),
                 ];
+                if let Some(build_id) = snapshot
+                    .executable_build_id
+                    .as_deref()
+                    .filter(|value| safe_value(value))
+                {
+                    observations.push(observation("game.elf_build_id", build_id));
+                }
+                observations.push(observation(
+                    "game.process_identity_stable",
+                    game_process
+                        .process_identity_stable
+                        .map(bool_value)
+                        .unwrap_or("unknown"),
+                ));
                 observations.extend(
                     snapshot
                         .loaded_module_basenames
                         .iter()
                         .filter(|module| safe_value(module))
+                        .take(96)
                         .map(|module| observation("agent.module", module)),
+                );
+                observations.extend(
+                    game_process
+                        .loaded_module_basenames
+                        .iter()
+                        .filter(|module| safe_value(module))
+                        .take(96)
+                        .map(|module| observation("game.module", module)),
                 );
                 let report = sign_report(
                     AgentIntegrityReportV1 {
@@ -191,6 +214,7 @@ mod tests {
         let policy_claims = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "competitive".into(),
+            tenant_id: "tenant".into(),
             game_id: "game".into(),
             environment_id: "test".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,

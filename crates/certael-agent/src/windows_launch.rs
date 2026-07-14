@@ -22,7 +22,8 @@ use windows_sys::Win32::{
             InitializeProcThreadAttributeList, ResumeThread, UpdateProcThreadAttribute,
             WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
             EXTENDED_STARTUPINFO_PRESENT, INFINITE, PROCESS_INFORMATION,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTUPINFOEXW,
+            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
+            STARTUPINFOEXW,
         },
     },
 };
@@ -41,7 +42,7 @@ pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Resu
     let child_handles = [game_read.raw(), game_write.raw()];
     let mut attribute_bytes = 0;
     unsafe {
-        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut attribute_bytes);
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 2, 0, &mut attribute_bytes);
     }
     if attribute_bytes == 0 {
         bail!("Windows did not provide an attribute-list size");
@@ -49,7 +50,7 @@ pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Resu
     let words = attribute_bytes.div_ceil(std::mem::size_of::<usize>());
     let mut attribute_storage = vec![0_usize; words];
     let attribute_list = attribute_storage.as_mut_ptr().cast();
-    if unsafe { InitializeProcThreadAttributeList(attribute_list, 1, 0, &mut attribute_bytes) } == 0
+    if unsafe { InitializeProcThreadAttributeList(attribute_list, 2, 0, &mut attribute_bytes) } == 0
     {
         bail!("failed to initialize process attributes: {}", unsafe {
             GetLastError()
@@ -71,6 +72,40 @@ pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Resu
         bail!("failed to restrict inherited handles: {}", unsafe {
             GetLastError()
         });
+    }
+    // Conservative process mitigations that do not prohibit engines from JITing,
+    // loading game plugins, or using graphics APIs. Security-sensitive projects
+    // may add stricter per-game policy after compatibility testing.
+    const DEP_ENABLE: u64 = 0x0000_0001;
+    const SEHOP_ENABLE: u64 = 0x0000_0004;
+    const FORCE_RELOCATE_IMAGES_ALWAYS_ON: u64 = 0x0000_0100;
+    const HEAP_TERMINATE_ALWAYS_ON: u64 = 0x0000_1000;
+    const BOTTOM_UP_ASLR_ALWAYS_ON: u64 = 0x0001_0000;
+    const HIGH_ENTROPY_ASLR_ALWAYS_ON: u64 = 0x0010_0000;
+    const STRICT_HANDLE_CHECKS_ALWAYS_ON: u64 = 0x0100_0000;
+    let mut mitigation_policy = DEP_ENABLE
+        | SEHOP_ENABLE
+        | FORCE_RELOCATE_IMAGES_ALWAYS_ON
+        | HEAP_TERMINATE_ALWAYS_ON
+        | BOTTOM_UP_ASLR_ALWAYS_ON
+        | HIGH_ENTROPY_ASLR_ALWAYS_ON
+        | STRICT_HANDLE_CHECKS_ALWAYS_ON;
+    if unsafe {
+        UpdateProcThreadAttribute(
+            attribute_list,
+            0,
+            PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY as usize,
+            (&mut mitigation_policy as *mut u64).cast(),
+            std::mem::size_of::<u64>(),
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    } == 0
+    {
+        bail!(
+            "failed to apply protected-game process mitigations: {}",
+            unsafe { GetLastError() }
+        );
     }
 
     let mut command_line = wide(windows_command_line(&game, &args));
