@@ -19,5 +19,6 @@ done <"$sbom_list"
 
 tar --null -czf "$output" --files-from="$sbom_list"
 test "$(wc -c <"$output")" -gt 100
-tar -tzf "$output" | grep -q '\.cdx\.json$'
+archive_entries=$(tar -tzf "$output")
+grep -q '\.cdx\.json$' <<<"$archive_entries"
 while IFS= read -r -d '' sbom; do rm -f "$sbom"; done <"$sbom_list"
