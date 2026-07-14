@@ -77,9 +77,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo install cargo-cyclonedx --version 0.5.9 --locked
-          cargo cyclonedx --format json --spec-version 1.5 --target all
-          find . -path '*/target' -prune -o -name bom.json -print0 | \
-            tar --null -czf "release/certael-agent-sbom-${GITHUB_REF_NAME}.tar.gz" --files-from=-
+          bash scripts/package-sbom.sh "release/certael-agent-sbom-${GITHUB_REF_NAME}.tar.gz"
       - name: Checksums
         run: (cd release && sha256sum * > checksums-sha256.txt)
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2

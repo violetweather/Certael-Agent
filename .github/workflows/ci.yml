@@ -33,6 +33,16 @@ jobs:
       - run: cargo install cargo-audit --version 0.22.2 --locked
       - run: cargo audit --deny warnings
 
+  sbom:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with: { persist-credentials: false }
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - run: cargo install cargo-cyclonedx --version 0.5.9 --locked
+      - run: bash scripts/package-sbom.sh /tmp/certael-agent-sbom-ci.tar.gz
+      - run: tar -tzf /tmp/certael-agent-sbom-ci.tar.gz
+
   actions-analysis:
     runs-on: ubuntu-24.04
     permissions:
