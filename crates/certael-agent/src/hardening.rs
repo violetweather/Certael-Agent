@@ -25,11 +25,22 @@ pub fn apply() -> Result<()> {
 #[cfg(windows)]
 fn apply_windows() -> Result<()> {
     use windows_sys::Win32::System::Threading::{
-        ProcessExtensionPointDisablePolicy, ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy,
-        SetProcessDEPPolicy, SetProcessMitigationPolicy, PROCESS_DEP_ENABLE,
+        GetCurrentProcess, GetProcessDEPPolicy, ProcessExtensionPointDisablePolicy,
+        ProcessImageLoadPolicy, ProcessStrictHandleCheckPolicy, SetProcessDEPPolicy,
+        SetProcessMitigationPolicy, PROCESS_DEP_ENABLE,
     };
-    if unsafe { SetProcessDEPPolicy(PROCESS_DEP_ENABLE) } == 0 {
-        bail!("failed to enable Agent DEP policy");
+
+    let mut dep_flags = 0_u32;
+    let mut dep_permanent = 0;
+    let dep_is_enabled = unsafe {
+        GetProcessDEPPolicy(GetCurrentProcess(), &mut dep_flags, &mut dep_permanent) != 0
+            && dep_flags & PROCESS_DEP_ENABLE != 0
+    };
+    if !dep_is_enabled && unsafe { SetProcessDEPPolicy(PROCESS_DEP_ENABLE) } == 0 {
+        bail!(
+            "failed to enable Agent DEP policy: {}",
+            std::io::Error::last_os_error()
+        );
     }
     for (policy, flags, reason) in [
         (
