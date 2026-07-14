@@ -123,6 +123,7 @@ mod tests {
         let policy = AgentPolicyClaimsV1 {
             protocol_version: 1,
             policy_id: "policy".into(),
+            tenant_id: "tenant".into(),
             game_id: "game".into(),
             environment_id: "prod".into(),
             requirement_mode: AgentRequirementModeV1::Required as i32,

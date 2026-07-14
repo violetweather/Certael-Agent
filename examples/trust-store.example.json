@@ -1,0 +1,11 @@
+{
+  "keys": [
+    {
+      "key_id": "replace-with-your-production-agent-policy-key",
+      "public_key_hex": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+      "not_before_unix": 0,
+      "not_after_unix": 4102444800,
+      "revoked": false
+    }
+  ]
+}

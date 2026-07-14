@@ -11,6 +11,7 @@ fn main() {
     let policy_claims = AgentPolicyClaimsV1 {
         protocol_version: 1,
         policy_id: "competitive".into(),
+        tenant_id: "tenant".into(),
         game_id: "game".into(),
         environment_id: "prod".into(),
         requirement_mode: AgentRequirementModeV1::Required as i32,

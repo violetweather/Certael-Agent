@@ -17,6 +17,7 @@ pub struct IntegritySnapshot {
     pub platform: String,
     pub process_id: u32,
     pub loaded_module_basenames: Vec<String>,
+    pub executable_build_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,6 +25,8 @@ pub struct GameProcessSnapshot {
     pub running: bool,
     pub executable_matches: bool,
     pub parent_is_agent: Option<bool>,
+    pub loaded_module_basenames: Vec<String>,
+    pub process_identity_stable: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -177,6 +180,7 @@ pub fn inspect_executable(path: &Path) -> Result<IntegritySnapshot> {
         platform: std::env::consts::OS.to_owned(),
         process_id: std::process::id(),
         loaded_module_basenames: loaded_module_basenames(),
+        executable_build_id: executable_build_id(&canonical),
     })
 }
 
@@ -199,6 +203,8 @@ pub fn inspect_game_process(process_id: u32, expected_path: &Path) -> GameProces
             running: false,
             executable_matches: false,
             parent_is_agent: None,
+            loaded_module_basenames: vec![],
+            process_identity_stable: None,
         };
     }
     inspect_game_process_platform(process_id, expected_path)
@@ -206,6 +212,7 @@ pub fn inspect_game_process(process_id: u32, expected_path: &Path) -> GameProces
 
 #[cfg(target_os = "linux")]
 fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    let process_identity_stable = linux_pidfd_alive(process_id);
     let actual = std::fs::read_link(format!("/proc/{process_id}/exe"));
     let running = actual.is_ok();
     let executable_matches = actual
@@ -220,10 +227,15 @@ fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameP
             after_name.split_whitespace().nth(1)?.parse::<u32>().ok()
         })
         .map(|parent| parent == std::process::id());
+    let loaded_module_basenames = std::fs::read_to_string(format!("/proc/{process_id}/maps"))
+        .map(|maps| module_basenames_from_maps(&maps))
+        .unwrap_or_default();
     GameProcessSnapshot {
         running,
         executable_matches,
         parent_is_agent,
+        loaded_module_basenames,
+        process_identity_stable,
     }
 }
 
@@ -260,6 +272,8 @@ fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameP
         running: actual.is_some(),
         executable_matches,
         parent_is_agent,
+        loaded_module_basenames: vec![],
+        process_identity_stable: None,
     }
 }
 
@@ -283,12 +297,15 @@ fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameP
             running: false,
             executable_matches: false,
             parent_is_agent: None,
+            loaded_module_basenames: vec![],
+            process_identity_stable: None,
         };
     }
     let mut path = vec![0_u16; 32_768];
     let mut length = path.len() as u32;
     let queried =
         unsafe { QueryFullProcessImageNameW(handle, 0, path.as_mut_ptr(), &mut length) } != 0;
+    let loaded_module_basenames = windows_process_modules(process_id);
     unsafe { CloseHandle(handle) };
     let executable_matches = queried
         && windows_paths_equal(
@@ -318,6 +335,8 @@ fn inspect_game_process_platform(process_id: u32, expected_path: &Path) -> GameP
         running: queried,
         executable_matches,
         parent_is_agent,
+        loaded_module_basenames,
+        process_identity_stable: None,
     }
 }
 
@@ -340,7 +359,42 @@ fn inspect_game_process_platform(_process_id: u32, _expected_path: &Path) -> Gam
         running: false,
         executable_matches: false,
         parent_is_agent: None,
+        loaded_module_basenames: vec![],
+        process_identity_stable: None,
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pidfd_alive(process_id: u32) -> Option<bool> {
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, process_id, 0) as libc::c_int };
+    if descriptor < 0 {
+        return None;
+    }
+    let mut poll = libc::pollfd {
+        fd: descriptor,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let result = unsafe { libc::poll(&mut poll, 1, 0) };
+    unsafe { libc::close(descriptor) };
+    (result >= 0).then_some(result == 0)
+}
+
+#[cfg(target_os = "linux")]
+fn executable_build_id(path: &Path) -> Option<String> {
+    use object::Object;
+    let bytes = std::fs::read(path).ok()?;
+    let file = object::File::parse(bytes.as_slice()).ok()?;
+    file.build_id()
+        .ok()
+        .flatten()
+        .filter(|value| !value.is_empty())
+        .map(hex::encode)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn executable_build_id(_path: &Path) -> Option<String> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -362,6 +416,11 @@ fn loaded_module_basenames() -> Vec<String> {
     let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
         return vec![];
     };
+    module_basenames_from_maps(&maps)
+}
+
+#[cfg(target_os = "linux")]
+fn module_basenames_from_maps(maps: &str) -> Vec<String> {
     maps.lines()
         .filter_map(|line| line.split_whitespace().last())
         .filter(|value| value.starts_with('/'))
@@ -372,6 +431,54 @@ fn loaded_module_basenames() -> Vec<String> {
         .into_iter()
         .take(1024)
         .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_modules(process_id: u32) -> Vec<String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HMODULE},
+        System::{
+            ProcessStatus::{K32EnumProcessModules, K32GetModuleBaseNameW},
+            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        },
+    };
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, process_id) };
+    if process.is_null() {
+        return vec![];
+    }
+    let mut needed = 0_u32;
+    unsafe { K32EnumProcessModules(process, std::ptr::null_mut(), 0, &mut needed) };
+    let count = (needed as usize / std::mem::size_of::<HMODULE>()).min(1024);
+    let mut modules = vec![std::ptr::null_mut(); count];
+    let success = count > 0
+        && unsafe {
+            K32EnumProcessModules(
+                process,
+                modules.as_mut_ptr(),
+                (modules.len() * std::mem::size_of::<HMODULE>()) as u32,
+                &mut needed,
+            )
+        } != 0;
+    let result = if success {
+        modules
+            .into_iter()
+            .filter_map(|module| {
+                let mut name = [0_u16; 256];
+                let length = unsafe {
+                    K32GetModuleBaseNameW(process, module, name.as_mut_ptr(), name.len() as u32)
+                } as usize;
+                (length > 0 && length < name.len())
+                    .then(|| String::from_utf16_lossy(&name[..length]))
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        vec![]
+    };
+    unsafe { CloseHandle(process) };
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -572,6 +679,10 @@ mod tests {
         assert_eq!(snapshot.executable_sha256.len(), 64);
         assert!(snapshot.executable_size > 0);
         assert!(snapshot.loaded_module_basenames.len() <= 1024);
+        #[cfg(target_os = "linux")]
+        assert!(snapshot.executable_build_id.as_ref().is_none_or(
+            |value| !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        ));
     }
 
     #[test]
@@ -581,6 +692,8 @@ mod tests {
         assert!(snapshot.running);
         assert!(snapshot.executable_matches);
         assert_ne!(snapshot.parent_is_agent, Some(true));
+        #[cfg(target_os = "linux")]
+        assert_eq!(snapshot.process_identity_stable, Some(true));
     }
     #[test]
     fn rejects_missing_path() {

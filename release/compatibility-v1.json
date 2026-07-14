@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "product": "certael-agent",
+  "product_version": "0.1.0",
+  "stability": "pre-1.0",
+  "agent_protocol_version": 1,
+  "local_ipc_version": 1,
+  "probe_abi_version": 1,
+  "compatible_core_agent_protocol_versions": [
+    1
+  ],
+  "supported_player_targets": [
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin"
+  ],
+  "notes": [
+    "Compatibility is determined by protocol and ABI versions, not by accepting every pre-1.0 release.",
+    "A game must validate the signed Agent policy and launch grant through Certael Core.",
+    "The Agent is optional user-mode evidence and does not make an untrusted client authoritative."
+  ]
+}

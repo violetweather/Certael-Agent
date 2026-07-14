@@ -278,6 +278,53 @@ pub fn read_activation_state(install_root: &Path) -> Result<ActivationState, Upd
     read_activation_state_canonical(&root)
 }
 
+/// Registers a version that was placed by a privileged offline installer.
+/// Existing active state is preserved until `activate` is explicitly requested.
+pub fn register_existing_version(
+    install_root: &Path,
+    version: &str,
+    installed_name: &str,
+    activate: bool,
+) -> Result<ActivationState, UpdateError> {
+    let root = canonical_install_root(install_root)?;
+    if !safe_component(version) || !safe_component(installed_name) {
+        return Err(UpdateError::InvalidConfiguration);
+    }
+    let relative_path = format!("versions/{version}/{installed_name}");
+    let target = root.join(&relative_path);
+    let slot = ActivationSlot {
+        version: version.to_owned(),
+        relative_path,
+        sha256: hash_file(&target)?,
+    };
+    verify_slot(&root, &slot)?;
+    let mut state = read_activation_state_canonical(&root)?;
+    if state.active.is_none() {
+        state.active = Some(slot);
+    } else if state.active.as_ref() != Some(&slot) {
+        state.pending = Some(slot);
+        if activate {
+            let pending = state.pending.take().ok_or(UpdateError::NoPendingUpdate)?;
+            state.previous = state.active.replace(pending);
+        }
+    }
+    write_activation_state(&root, &state)?;
+    Ok(state)
+}
+
+/// Resolves and re-verifies the executable selected by the atomic activation
+/// state. Launchers must call this on every start, never trust a stale path.
+pub fn active_target(install_root: &Path) -> Result<PathBuf, UpdateError> {
+    let root = canonical_install_root(install_root)?;
+    let state = recover(&root)?;
+    let active = state.active.ok_or(UpdateError::InvalidActivationState)?;
+    verify_slot(&root, &active)?;
+    let target = root.join(active.relative_path);
+    target
+        .canonicalize()
+        .map_err(|_| UpdateError::InvalidActivationState)
+}
+
 fn read_activation_state_canonical(install_root: &Path) -> Result<ActivationState, UpdateError> {
     let path = install_root.join("activation.json");
     if !path.exists() {
@@ -623,6 +670,39 @@ mod tests {
         let state = recover(&root).unwrap();
         assert_eq!(state.active.as_ref().unwrap().version, "1.0.0");
         assert!(state.pending.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn registers_and_resolves_offline_installed_versions() {
+        let root = std::env::temp_dir().join(format!(
+            "certael-update-register-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("versions/1.0.0")).unwrap();
+        std::fs::write(root.join("versions/1.0.0/certael-agent"), b"one").unwrap();
+        let state = register_existing_version(&root, "1.0.0", "certael-agent", true).unwrap();
+        assert_eq!(state.active.as_ref().unwrap().version, "1.0.0");
+        assert_eq!(
+            active_target(&root).unwrap(),
+            root.join("versions/1.0.0/certael-agent")
+                .canonicalize()
+                .unwrap()
+        );
+
+        std::fs::create_dir_all(root.join("versions/1.1.0")).unwrap();
+        std::fs::write(root.join("versions/1.1.0/certael-agent"), b"two").unwrap();
+        let staged = register_existing_version(&root, "1.1.0", "certael-agent", false).unwrap();
+        assert_eq!(staged.active.as_ref().unwrap().version, "1.0.0");
+        assert_eq!(staged.pending.as_ref().unwrap().version, "1.1.0");
+        assert_eq!(
+            activate_pending(&root).unwrap().active.unwrap().version,
+            "1.1.0"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
