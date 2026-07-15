@@ -14,6 +14,7 @@ pub enum MessageType {
     IntegrityReport = 4,
     Health = 5,
     Shutdown = 6,
+    Revocation = 7,
 }
 
 impl TryFrom<u8> for MessageType {
@@ -26,6 +27,7 @@ impl TryFrom<u8> for MessageType {
             4 => Ok(Self::IntegrityReport),
             5 => Ok(Self::Health),
             6 => Ok(Self::Shutdown),
+            7 => Ok(Self::Revocation),
             _ => Err(IpcError::UnknownMessage),
         }
     }

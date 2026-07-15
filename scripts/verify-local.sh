@@ -18,15 +18,12 @@ if [[ "$(uname -s)" == Linux || "$(uname -s)" == Darwin ]]; then
   cp target/release/certael-agent "$package/certael-agent"
   cp target/release/certael-agent-launcher "$package/certael-agent-launcher"
   cp install/install.sh "$package/install/install.sh"
-  cp examples/trust-store.example.json "$sandbox/trust-store.json"
   chmod 0755 "$package/certael-agent" "$package/certael-agent-launcher" \
     "$package/install/install.sh"
-  "$package/install/install.sh" --prefix "$prefix" --version 0.0.0-local \
-    --trust-store "$sandbox/trust-store.json"
+  "$package/install/install.sh" --prefix "$prefix" --version 0.0.0-local
   "$prefix/bin/certael-agent" update-status \
     --install-root "$prefix/lib/certael-agent" >/dev/null
-  "$prefix/bin/certael-agent" validate-trust-store \
-    --trust-store "$prefix/etc/certael/trust-store.json" >/dev/null
+  "$prefix/bin/certael-agent" list-games >/dev/null
 fi
 
 echo "Certael Agent local verification passed."

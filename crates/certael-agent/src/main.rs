@@ -3,7 +3,7 @@ use certael_agent_platform::{inspect_executable, validate_game_path};
 use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
 use certael_agent_updater::{
     activate_pending, read_activation_state, recover, register_existing_version, rollback,
-    verify_stage_and_install, InstallConfig, UpdateConfig,
+    verify_stage_and_install, verify_stage_and_install_automatic, InstallConfig, UpdateConfig,
 };
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
@@ -13,7 +13,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 mod hardening;
+mod registry;
 mod runtime;
+mod status;
 mod trust;
 mod ui;
 #[cfg(windows)]
@@ -47,6 +49,52 @@ enum Commands {
         trust_store: PathBuf,
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    RegisterGame {
+        #[arg(long)]
+        registration: PathBuf,
+        #[arg(long)]
+        publisher_trust_store: PathBuf,
+        #[arg(long)]
+        update_root: PathBuf,
+        #[arg(long)]
+        game_root: PathBuf,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    UpdateGameRegistration {
+        #[arg(long)]
+        registration: PathBuf,
+        #[arg(long)]
+        publisher_trust_store: PathBuf,
+        #[arg(long)]
+        update_root: PathBuf,
+        #[arg(long)]
+        game_root: PathBuf,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    ListGames {
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    LaunchGame {
+        #[arg(long)]
+        registration_id: String,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
+    UpdateRegisteredGame {
+        #[arg(long)]
+        registration_id: String,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+        #[arg(long)]
+        install_root: Option<PathBuf>,
+        #[arg(long)]
+        activate: bool,
     },
     Update {
         #[arg(long)]
@@ -113,6 +161,91 @@ fn main() -> Result<()> {
             trust_store,
             args,
         }) => launch(game, trust_store, args)?,
+        Some(Commands::RegisterGame {
+            registration,
+            publisher_trust_store,
+            update_root,
+            game_root,
+            registry_root,
+        }) => {
+            let claims = registry::register(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration,
+                &publisher_trust_store,
+                &update_root,
+                &game_root,
+            )?;
+            println!("registered {} ({})", claims.game_id, claims.registration_id);
+        }
+        Some(Commands::UpdateGameRegistration {
+            registration,
+            publisher_trust_store,
+            update_root,
+            game_root,
+            registry_root,
+        }) => {
+            let claims = registry::update(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration,
+                &publisher_trust_store,
+                &update_root,
+                &game_root,
+            )?;
+            println!("updated {} ({})", claims.game_id, claims.registration_id);
+        }
+        Some(Commands::ListGames { registry_root }) => {
+            for game in registry::list(&registry_root.unwrap_or_else(registry::default_root))? {
+                println!("{game}");
+            }
+        }
+        Some(Commands::LaunchGame {
+            registration_id,
+            registry_root,
+            args,
+        }) => {
+            let registered = registry::load(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration_id,
+            )?;
+            launch_registered(registered, args)?;
+        }
+        Some(Commands::UpdateRegisteredGame {
+            registration_id,
+            registry_root,
+            install_root,
+            activate,
+        }) => {
+            let registered = registry::load(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration_id,
+            )?;
+            let install_root = install_root.unwrap_or_else(default_install_root);
+            let update_state = registered.state_root.join("update");
+            let target_name = format!(
+                "certael-agent/{}/{}",
+                registered.claims.update_channel,
+                target_platform()
+            );
+            let runtime = tokio::runtime::Runtime::new()?;
+            let installed = runtime.block_on(verify_stage_and_install_automatic(
+                &UpdateConfig {
+                    trusted_root: registered.update_root,
+                    metadata_base_url: url::Url::parse(&registered.claims.update_metadata_url)?,
+                    targets_base_url: url::Url::parse(&registered.claims.update_targets_url)?,
+                    datastore: update_state.join("metadata"),
+                    staging_directory: update_state.join("staging"),
+                    target_name,
+                },
+                &install_root,
+                platform_agent_name(),
+                &registered.claims.update_channel,
+                target_platform(),
+            ))?;
+            if activate {
+                activate_pending(&install_root)?;
+            }
+            println!("verified Agent update staged at {}", installed.display());
+        }
         Some(Commands::Update {
             trusted_root,
             metadata_url,
@@ -189,8 +322,74 @@ const fn platform_agent_name() -> &'static str {
     }
 }
 
+const fn target_platform() -> &'static str {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else {
+        "unsupported"
+    }
+}
+
+fn default_install_root() -> PathBuf {
+    #[cfg(windows)]
+    {
+        std::env::var_os("ProgramFiles")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
+            .join("Certael")
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/usr/local/lib/certael-agent")
+}
+
 fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> {
+    launch_with_registration(game, trust_store, args, None)
+}
+
+fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) -> Result<()> {
+    let binding = runtime::RegistrationBinding {
+        registration_id: registered.claims.registration_id.clone(),
+        tenant_id: registered.claims.tenant_id,
+        game_id: registered.claims.game_id,
+        environment_id: registered.claims.environment_id,
+        status_path: registered.status_path,
+    };
+    launch_with_root(
+        registered.game,
+        registered.game_root,
+        registered.trust_store,
+        args,
+        Some(binding),
+    )
+}
+
+fn launch_with_registration(
+    game: PathBuf,
+    trust_store: PathBuf,
+    args: Vec<String>,
+    registration: Option<runtime::RegistrationBinding>,
+) -> Result<()> {
     let game = validate_game_path(&game)?;
+    let game_root = game
+        .parent()
+        .context("game has no installation root")?
+        .to_path_buf();
+    launch_with_root(game, game_root, trust_store, args, registration)
+}
+
+fn launch_with_root(
+    game: PathBuf,
+    game_root: PathBuf,
+    trust_store: PathBuf,
+    args: Vec<String>,
+    registration: Option<runtime::RegistrationBinding>,
+) -> Result<()> {
     let snapshot = inspect_executable(&game)?;
     let key = SigningKey::generate(&mut OsRng);
     let hello = AgentHelloV1 {
@@ -203,9 +402,12 @@ fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> 
     let state = runtime::RuntimeState {
         trust: trust::load(&trust_store)?,
         game: game.clone(),
+        game_root,
         game_process_id: 0,
+        game_process_identity: None,
         key,
         hello,
+        registration,
     };
 
     #[cfg(unix)]
@@ -247,16 +449,16 @@ fn launch_unix(game: PathBuf, args: Vec<String>, mut state: runtime::RuntimeStat
         .spawn()
         .context("failed to launch game")?;
     state.game_process_id = child.id();
+    state.game_process_identity = certael_agent_platform::process_identity(child.id());
     unsafe {
         libc::close(child_fd);
     }
-    let mut channel = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let channel = unsafe { std::fs::File::from_raw_fd(fds[0]) };
     let mut writer = channel
         .try_clone()
         .context("failed to clone private Agent channel")?;
-    runtime::serve(&mut channel, &mut writer, &state)?;
+    runtime::serve(channel, &mut writer, &state)?;
     drop(writer);
-    drop(channel);
     let status = child.wait()?;
     if !status.success() {
         bail!("game exited unsuccessfully: {status}");

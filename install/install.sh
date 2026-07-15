@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: sudo ./install.sh --trust-store /path/to/trust-store.json [--prefix /usr/local] [--version 0.1.0]" >&2
+  echo "Usage: sudo ./install.sh [--prefix /usr/local] [--version 0.2.0] [--registration FILE --publisher-trust-store FILE --update-root FILE --game-root DIR]" >&2
 }
 
 replace_link() {
@@ -13,20 +13,33 @@ replace_link() {
 }
 
 prefix=/usr/local
-version=0.1.0
-trust_store=
+version=0.2.0
+registration= publisher_trust_store= update_root= game_root=
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --prefix) prefix="${2:-}"; shift 2 ;;
     --version) version="${2:-}"; shift 2 ;;
-    --trust-store) trust_store="${2:-}"; shift 2 ;;
+    --registration) registration="${2:-}"; shift 2 ;;
+    --publisher-trust-store) publisher_trust_store="${2:-}"; shift 2 ;;
+    --update-root) update_root="${2:-}"; shift 2 ;;
+    --game-root) game_root="${2:-}"; shift 2 ;;
     *) usage; exit 2 ;;
   esac
 done
 
-if [[ -z "$trust_store" || -L "$trust_store" || ! -f "$trust_store" ]]; then
-  echo "A regular, non-symlink public trust-store file is required." >&2
+provided=0
+for value in "$registration" "$publisher_trust_store" "$update_root" "$game_root"; do
+  [[ -n "$value" ]] && provided=$((provided + 1))
+done
+if [[ $provided -ne 0 && $provided -ne 4 ]]; then
+  echo "Registration, publisher trust store, update root, and game root must be supplied together." >&2
   exit 2
+fi
+if [[ $provided -eq 4 ]]; then
+  for file in "$registration" "$publisher_trust_store" "$update_root"; do
+    [[ -f "$file" && ! -L "$file" ]] || { echo "$file must be a regular, non-symlink file." >&2; exit 2; }
+  done
+  [[ -d "$game_root" && ! -L "$game_root" ]] || { echo "Game root must be a non-symlink directory." >&2; exit 2; }
 fi
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "The install version is invalid." >&2
@@ -42,14 +55,12 @@ if [[ ! -x "$source_dir/certael-agent-launcher" ]]; then
   echo "certael-agent-launcher is missing from the extracted release directory." >&2
   exit 1
 fi
-"$source_dir/certael-agent" validate-trust-store --trust-store "$trust_store" >/dev/null
 
 base="$prefix/lib/certael-agent"
 destination="$base/versions/$version"
-configuration="${CERTAEL_CONFIG_DIR:-$prefix/etc/certael}"
 binary_dir="$prefix/bin"
 umask 022
-mkdir -p "$base/versions" "$configuration" "$binary_dir"
+mkdir -p "$base/versions" "$binary_dir"
 temporary="$(mktemp -d "$base/versions/.install.XXXXXX")"
 trap 'rm -rf "$temporary"' EXIT
 
@@ -68,8 +79,6 @@ mv "$temporary" "$destination"
 trap - EXIT
 "$destination/certael-agent" register-installed-version \
   --install-root "$base" --version "$version" --installed-name certael-agent --activate
-install -m 0644 "$trust_store" "$configuration/trust-store.json.new"
-mv -f "$configuration/trust-store.json.new" "$configuration/trust-store.json"
 
 launcher_new="$base/.certael-agent-launcher.$$"
 install -m 0755 "$source_dir/certael-agent-launcher" "$launcher_new"
@@ -78,6 +87,11 @@ command_link="$binary_dir/.certael-agent.$$"
 ln -s "$base/certael-agent-launcher" "$command_link"
 replace_link "$command_link" "$binary_dir/certael-agent"
 
+if [[ $provided -eq 4 ]]; then
+  "$binary_dir/certael-agent" register-game --registration "$registration" \
+    --publisher-trust-store "$publisher_trust_store" --update-root "$update_root" \
+    --game-root "$game_root"
+fi
+
 echo "Installed Certael Agent $version."
-echo "Public trust store: $configuration/trust-store.json"
 echo "Launcher: $binary_dir/certael-agent"

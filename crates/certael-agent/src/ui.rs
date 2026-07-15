@@ -1,12 +1,16 @@
 use anyhow::{anyhow, Result};
 use eframe::egui;
+use std::{
+    process::Command,
+    time::{Duration, Instant},
+};
 
 pub fn run() -> Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Certael Agent")
-            .with_inner_size([620.0, 520.0])
-            .with_min_inner_size([520.0, 420.0]),
+            .with_inner_size([720.0, 600.0])
+            .with_min_inner_size([560.0, 440.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -17,47 +21,162 @@ pub fn run() -> Result<()> {
     .map_err(|error| anyhow!(error.to_string()))
 }
 
+struct GameView {
+    registration_id: String,
+    state: String,
+    reason: Option<String>,
+}
+
 struct AgentApp {
-    status: &'static str,
+    games: Vec<GameView>,
+    last_refresh: Instant,
+    action: Option<String>,
 }
 
 impl Default for AgentApp {
     fn default() -> Self {
-        Self {
-            status: "Ready — no protected game is running",
+        let mut value = Self {
+            games: vec![],
+            last_refresh: Instant::now() - Duration::from_secs(10),
+            action: None,
+        };
+        value.refresh();
+        value
+    }
+}
+
+impl AgentApp {
+    fn refresh(&mut self) {
+        let root = crate::registry::default_root();
+        self.games = crate::registry::list(&root)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|registration_id| {
+                let status = crate::status::path(&registration_id)
+                    .ok()
+                    .and_then(|path| crate::status::read(&path).ok());
+                GameView {
+                    registration_id,
+                    state: status
+                        .as_ref()
+                        .map(|value| value.state.clone())
+                        .unwrap_or_else(|| "not_running".into()),
+                    reason: status.and_then(|value| value.public_reason),
+                }
+            })
+            .collect();
+        self.last_refresh = Instant::now();
+    }
+
+    fn run_action(&mut self, registration_id: &str, command: &str) {
+        let executable = match std::env::current_exe() {
+            Ok(value) => value,
+            Err(_) => {
+                self.action = Some("Agent installation cannot be resolved; run repair.".into());
+                return;
+            }
+        };
+        let mut process = Command::new(executable);
+        process
+            .arg(command)
+            .arg("--registration-id")
+            .arg(registration_id);
+        if command == "update-registered-game" {
+            process.arg("--activate");
+        }
+        match process.spawn() {
+            Ok(_) => {
+                self.action = Some(if command == "launch-game" {
+                    format!("Starting {registration_id} in protected mode…")
+                } else {
+                    format!("Checking trusted updates for {registration_id}…")
+                });
+            }
+            Err(_) => {
+                self.action =
+                    Some("Action failed to start; run Agent repair as administrator.".into());
+            }
+        }
+    }
+
+    fn run_recovery(&mut self, command: &str) {
+        let Ok(executable) = std::env::current_exe() else {
+            self.action = Some("Agent installation cannot be resolved; reinstall Agent.".into());
+            return;
+        };
+        let install_root = crate::default_install_root();
+        match Command::new(executable)
+            .arg(command)
+            .arg("--install-root")
+            .arg(install_root)
+            .spawn()
+        {
+            Ok(_) => self.action = Some(format!("Agent {command} started…")),
+            Err(_) => self.action = Some("Recovery failed to start; run as administrator.".into()),
         }
     }
 }
 
 impl eframe::App for AgentApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.heading("Certael Agent");
-            ui.add_space(8.0);
-            ui.label(self.status);
-            ui.separator();
-            ui.heading("What Certael can report");
-            ui.label("• Approved game-file hashes and executable identity");
-            ui.label("• Agent/game process relationship and loaded image names");
-            ui.label("• Debugger observation and in-process probe health");
-            ui.label("• Report time, build, session, and protocol health");
-            ui.add_space(8.0);
-            ui.heading("What Certael does not collect");
-            ui.label("• Keystrokes, screenshots, raw memory, or window titles");
-            ui.label("• Usernames, email addresses, or full command lines");
-            ui.label("• Unrelated process inventories or network history");
-            ui.add_space(8.0);
-            ui.separator();
-            ui.label(
-                "Client evidence is advisory. The authoritative game server decides gameplay.",
-            );
-            ui.label("Offline games never require Certael Agent.");
-            ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
-                if ui.button("Exit").clicked() {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        if self.last_refresh.elapsed() >= Duration::from_secs(1) {
+            self.refresh();
+        }
+        ui.ctx().request_repaint_after(Duration::from_secs(1));
+        ui.heading("Certael Agent");
+        ui.label(format!("Version {}", env!("CARGO_PKG_VERSION")));
+        ui.separator();
+        ui.heading("Registered games");
+        if self.games.is_empty() {
+            ui.label("No games are registered with Certael Agent.");
+        }
+        let mut requested = None;
+        for game in &self.games {
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&game.registration_id);
+                    ui.label(format!("Status: {}", game.state));
+                });
+                if let Some(reason) = &game.reason {
+                    ui.label(format!("Reason: {reason}"));
                 }
-                ui.label(format!("Version {} (pre-1.0)", env!("CARGO_PKG_VERSION")));
+                ui.horizontal(|ui| {
+                    if ui.button("Launch protected").clicked() {
+                        requested = Some((game.registration_id.clone(), "launch-game"));
+                    }
+                    if ui.button("Check trusted update").clicked() {
+                        requested = Some((game.registration_id.clone(), "update-registered-game"));
+                    }
+                });
             });
+        }
+        if let Some((id, command)) = requested {
+            self.run_action(&id, command);
+        }
+        if let Some(action) = &self.action {
+            ui.separator();
+            ui.label(action);
+        }
+        ui.separator();
+        ui.heading("Recovery");
+        ui.horizontal(|ui| {
+            if ui.button("Repair interrupted update").clicked() {
+                self.run_recovery("recover-update");
+            }
+            if ui.button("Roll back Agent").clicked() {
+                self.run_recovery("rollback-update");
+            }
+        });
+        ui.separator();
+        ui.heading("Privacy boundary");
+        ui.label("Certael can report approved game-file hashes, process relationship, loaded image names, debugger observation, probe health, and protocol health.");
+        ui.label("It does not collect keystrokes, screenshots, raw memory, window titles, identities, unrelated processes, or network history.");
+        ui.label("Client evidence is advisory. The authoritative game server decides gameplay.");
+        ui.label("Offline games never require Certael Agent.");
+        ui.with_layout(egui::Layout::bottom_up(egui::Align::RIGHT), |ui| {
+            if ui.button("Exit").clicked() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
         });
     }
 }

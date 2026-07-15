@@ -47,6 +47,7 @@ fn main() {
         expires_at_unix: 1_700_000_060,
         policy_digest,
         authoritative_server_id: "server".into(),
+        build_manifest_digest: vec![5; 32],
     };
     let grant_bytes = grant_claims.encode_to_vec();
     let grant_signature = key.sign(&[LAUNCH_DOMAIN, &grant_bytes].concat()).to_bytes();
