@@ -153,10 +153,9 @@ pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Resu
     drop(game_write);
 
     let mut outbound = unsafe { std::fs::File::from_raw_handle(agent_write.take() as *mut _) };
-    let mut inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
+    let inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
     runtime::serve(inbound, &mut outbound, &state).context("protected Agent session failed")?;
     drop(outbound);
-    drop(inbound);
 
     if unsafe { WaitForSingleObject(process_handle.raw(), INFINITE) } != WAIT_OBJECT_0 {
         bail!("failed while waiting for protected game");
