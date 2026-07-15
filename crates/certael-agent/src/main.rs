@@ -339,10 +339,10 @@ const fn target_platform() -> &'static str {
 fn default_install_root() -> PathBuf {
     #[cfg(windows)]
     {
-        return std::env::var_os("ProgramFiles")
+        std::env::var_os("ProgramFiles")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Program Files"))
-            .join("Certael");
+            .join("Certael")
     }
     #[cfg(not(windows))]
     PathBuf::from("/usr/local/lib/certael-agent")

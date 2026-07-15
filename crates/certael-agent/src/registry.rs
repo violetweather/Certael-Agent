@@ -41,7 +41,7 @@ pub fn default_root() -> PathBuf {
         let base = std::env::var_os("ProgramData")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"));
-        return base.join("Certael").join("games");
+        base.join("Certael").join("games")
     }
     #[cfg(not(windows))]
     PathBuf::from("/usr/local/etc/certael/games")
