@@ -7,15 +7,15 @@ The Agent is pre-1.0. It has no kernel driver, does not make a client trustworth
 ## Install a prebuilt release
 
 Normal players and game developers do not need Rust or a native compiler.
-Extract the archive for the computer, obtain the game operator's public
-`trust-store.json`, then run the included installer as an administrator:
+Extract the archive and run the included installer as an administrator. The
+Agent installs once; each game is added with a publisher-signed registration.
 
 ```powershell
-.\install\install.ps1 -TrustStore C:\path\to\trust-store.json
+.\install\install.ps1
 ```
 
 ```bash
-sudo ./install/install.sh --trust-store /path/to/trust-store.json
+sudo ./install/install.sh
 ```
 
 See [the complete installation guide](docs/INSTALLING.md), including installed
@@ -34,7 +34,10 @@ cargo run -p certael-agent -- launch --game /path/to/game \
 Run the complete local format, lint, test, release-build, installer, launcher,
 and trust-store smoke suite with `./scripts/verify-local.sh` on macOS or Linux.
 
-The trust store pins the game operator's Ed25519 Agent signing roots. Start from
+For source-only development, the legacy explicit `launch` command accepts one
+trust store. Production installs use `register-game` and `launch-game`, which
+isolate trust and update roots per game. A trust store pins the game operator's
+Ed25519 Agent signing roots. Start from
 [`examples/trust-store.example.json`](examples/trust-store.example.json), replace
 the example public key and validity window, and install it outside the
 game-writable directory. It must not be group- or world-writable on Unix:
@@ -53,7 +56,12 @@ game-writable directory. It must not be group- or world-writable on Unix:
 
 The launched game receives a private inherited socket descriptor in `CERTAEL_AGENT_FD` on Unix. Windows receives separate restricted inherited anonymous-pipe handles. These are local process handles, not network listeners.
 
-After `AgentHelloV1`, the game obtains a signed policy and short-lived launch grant from its authoritative server, sends both in `AgentLaunchBundleV1`, relays fresh server challenges, and forwards the Agent's signed reports. Missing trust roots, altered bundles, wrong builds, expired grants, invalid challenges, changed executables, and malformed frames fail closed.
+After `AgentHelloV1`, the game obtains a signed policy, short-lived launch
+grant, and signed whole-build manifest from its authoritative server. It sends
+all three in `AgentLaunchBundleV1`, relays fresh server challenges, forwards
+signed reports, and can relay a signed revocation. Missing trust roots, altered
+files, wrong builds, expired state, missed deadlines, changed process identity,
+and malformed frames fail closed.
 
 ## Privacy boundary
 

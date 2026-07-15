@@ -18,6 +18,12 @@ This repository remains pre-1.0 until every gate has published evidence.
 - [x] Core-backed launch-grant, one-time challenge, report, health, and revocation transport
 - [x] Core-owned signed immutable policy lifecycle with durable approvals and tenant isolation
 - [x] Atomic versioned platform installer, verified launcher, activation, recovery, and rollback
+- [x] Signed per-game registration with isolated trust and TUF roots
+- [x] Signed whole-build manifest verification before protected admission
+- [x] Timed heartbeat, report deadline, expiry, disconnect-grace, and signed-revocation state machine
+- [x] Trusted automatic update selection and GUI launch/update/recovery controls
+- [x] Stable process-start identity binding on Windows, macOS, and Linux
+- [x] Stable-release workflow gates for Authenticode, Developer ID, and notarization credentials
 - [ ] Exercised offline 2-of-3 TUF root ceremony
 - [x] Windows child-process mitigations and Agent process mitigations
 - [ ] Windows Authenticode signing and validation evidence

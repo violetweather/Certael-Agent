@@ -152,6 +152,7 @@ mod tests {
             expires_at_unix: 1_700_000_060,
             policy_digest: Sha256::digest(signed_policy.encode_to_vec()).to_vec(),
             authoritative_server_id: "server".into(),
+            build_manifest_digest: vec![4; 32],
         };
         let session =
             AgentSession::activate(key, grant, policy, &signed_policy, "session".into()).unwrap();

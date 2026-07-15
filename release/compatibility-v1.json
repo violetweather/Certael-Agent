@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "certael-agent",
-  "product_version": "0.1.0",
+  "product_version": "0.2.0",
   "stability": "pre-1.0",
   "agent_protocol_version": 1,
   "local_ipc_version": 1,
@@ -17,7 +17,9 @@
   ],
   "notes": [
     "Compatibility is determined by protocol and ABI versions, not by accepting every pre-1.0 release.",
-    "A game must validate the signed Agent policy and launch grant through Certael Core.",
+    "Launch requires a signed policy, launch grant, and whole-build manifest from Certael Core.",
+    "Production installs use isolated signed multi-game registrations; legacy explicit launch remains development-only.",
+    "Protocol v1 health heartbeats and signed revocation frames are supported.",
     "The Agent is optional user-mode evidence and does not make an untrusted client authoritative."
   ]
 }

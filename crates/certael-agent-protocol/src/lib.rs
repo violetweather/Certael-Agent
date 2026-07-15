@@ -7,6 +7,9 @@ pub const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 pub const REPORT_DOMAIN: &[u8] = b"certael.agent.report.v1\0";
 pub const LAUNCH_DOMAIN: &[u8] = b"certael.agent.launch.v1\0";
 pub const POLICY_DOMAIN: &[u8] = b"certael.agent.policy.v1\0";
+pub const BUILD_MANIFEST_DOMAIN: &[u8] = b"certael.agent.build-manifest.v1\0";
+pub const REGISTRATION_DOMAIN: &[u8] = b"certael.agent.registration.v1\0";
+pub const REVOCATION_DOMAIN: &[u8] = b"certael.agent.revocation.v1\0";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
@@ -80,6 +83,8 @@ pub struct AgentLaunchGrantClaimsV1 {
     pub policy_digest: Vec<u8>,
     #[prost(string, tag = "13")]
     pub authoritative_server_id: String,
+    #[prost(bytes = "vec", tag = "14")]
+    pub build_manifest_digest: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -112,9 +117,95 @@ pub struct AgentLaunchBundleV1 {
     pub signed_policy: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
     pub signed_launch_grant: Vec<u8>,
+    #[prost(bytes = "vec", tag = "3")]
+    pub signed_build_manifest: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Message)]
+pub struct ProtectedBuildFileV1 {
+    #[prost(string, tag = "1")]
+    pub path: String,
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub sha256: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct BuildManifestClaimsV1 {
+    #[prost(uint32, tag = "1")]
+    pub protocol_version: u32,
+    #[prost(string, tag = "2")]
+    pub manifest_id: String,
+    #[prost(string, tag = "3")]
+    pub tenant_id: String,
+    #[prost(string, tag = "4")]
+    pub game_id: String,
+    #[prost(string, tag = "5")]
+    pub environment_id: String,
+    #[prost(string, tag = "6")]
+    pub build_id: String,
+    #[prost(message, repeated, tag = "7")]
+    pub files: Vec<ProtectedBuildFileV1>,
+    #[prost(int64, tag = "8")]
+    pub not_before_unix: i64,
+    #[prost(int64, tag = "9")]
+    pub expires_at_unix: i64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SignedBuildManifestV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub claims: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub key_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct GameRegistrationClaimsV1 {
+    #[prost(uint32, tag = "1")]
+    pub protocol_version: u32,
+    #[prost(string, tag = "2")]
+    pub registration_id: String,
+    #[prost(string, tag = "3")]
+    pub publisher_id: String,
+    #[prost(string, tag = "4")]
+    pub tenant_id: String,
+    #[prost(string, tag = "5")]
+    pub game_id: String,
+    #[prost(string, tag = "6")]
+    pub environment_id: String,
+    #[prost(string, tag = "7")]
+    pub executable_relative_path: String,
+    #[prost(bytes = "vec", tag = "8")]
+    pub trust_store_sha256: Vec<u8>,
+    #[prost(bytes = "vec", tag = "9")]
+    pub update_root_sha256: Vec<u8>,
+    #[prost(string, tag = "10")]
+    pub update_metadata_url: String,
+    #[prost(string, tag = "11")]
+    pub update_targets_url: String,
+    #[prost(string, tag = "12")]
+    pub update_channel: String,
+    #[prost(int64, tag = "13")]
+    pub not_before_unix: i64,
+    #[prost(int64, tag = "14")]
+    pub expires_at_unix: i64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SignedGameRegistrationV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub claims: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub key_id: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct BoundAgentLaunch {
     pub session_id: String,
     pub tenant_id: String,
@@ -124,8 +215,13 @@ pub struct BoundAgentLaunch {
     pub match_id: String,
     pub build_id: String,
     pub authoritative_server_id: String,
+    pub build_manifest: BuildManifestClaimsV1,
+    pub build_manifest_digest: [u8; 32],
+    pub heartbeat_seconds: u32,
     pub report_seconds: u32,
     pub disconnect_grace_seconds: u32,
+    pub policy_expires_at_unix: i64,
+    pub grant_expires_at_unix: i64,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -183,13 +279,33 @@ pub struct AgentHealthV1 {
 }
 
 #[derive(Clone, PartialEq, Message)]
-pub struct AgentRevocationV1 {
-    #[prost(string, tag = "1")]
-    pub agent_session_id: String,
+pub struct AgentRevocationClaimsV1 {
+    #[prost(uint32, tag = "1")]
+    pub protocol_version: u32,
     #[prost(string, tag = "2")]
+    pub tenant_id: String,
+    #[prost(string, tag = "3")]
+    pub game_id: String,
+    #[prost(string, tag = "4")]
+    pub environment_id: String,
+    #[prost(string, tag = "5")]
+    pub agent_session_id: String,
+    #[prost(string, tag = "6")]
     pub reason: String,
-    #[prost(int64, tag = "3")]
+    #[prost(int64, tag = "7")]
     pub revoked_at_unix: i64,
+    #[prost(int64, tag = "8")]
+    pub expires_at_unix: i64,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SignedAgentRevocationV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub claims: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub key_id: String,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -290,6 +406,65 @@ pub fn verify_launch_grant(
     Ok(claims)
 }
 
+pub fn verify_build_manifest(
+    signed: &SignedBuildManifestV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<BuildManifestClaimsV1, ProtocolError> {
+    let claims: BuildManifestClaimsV1 = decode_canonical(&signed.claims)?;
+    validate_build_manifest(&claims, now_unix)?;
+    verify_signed_bytes(
+        BUILD_MANIFEST_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+pub fn verify_game_registration(
+    signed: &SignedGameRegistrationV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<GameRegistrationClaimsV1, ProtocolError> {
+    let claims: GameRegistrationClaimsV1 = decode_canonical(&signed.claims)?;
+    validate_game_registration(&claims, now_unix)?;
+    verify_signed_bytes(
+        REGISTRATION_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+pub fn verify_revocation(
+    signed: &SignedAgentRevocationV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<AgentRevocationClaimsV1, ProtocolError> {
+    let claims: AgentRevocationClaimsV1 = decode_canonical(&signed.claims)?;
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.tenant_id)
+        || !identifier(&claims.game_id)
+        || !identifier(&claims.environment_id)
+        || !identifier(&claims.agent_session_id)
+        || !identifier(&claims.reason)
+        || claims.revoked_at_unix > now_unix + 30
+        || claims.expires_at_unix <= now_unix
+        || claims.expires_at_unix - claims.revoked_at_unix > 300
+    {
+        return Err(ProtocolError::InvalidField("revocation"));
+    }
+    verify_signed_bytes(
+        REVOCATION_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
 pub fn verify_launch_bundle(
     input: &[u8],
     keys: &VerificationKeyRing,
@@ -301,8 +476,11 @@ pub fn verify_launch_bundle(
     let bundle: AgentLaunchBundleV1 = decode_canonical(input)?;
     let policy_envelope: SignedAgentPolicyV1 = decode_canonical(&bundle.signed_policy)?;
     let grant_envelope: SignedAgentLaunchGrantV1 = decode_canonical(&bundle.signed_launch_grant)?;
+    let manifest_envelope: SignedBuildManifestV1 = decode_canonical(&bundle.signed_build_manifest)?;
     let policy = verify_policy(&policy_envelope, keys, now_unix)?;
     let grant = verify_launch_grant(&grant_envelope, keys, now_unix)?;
+    let manifest = verify_build_manifest(&manifest_envelope, keys, now_unix)?;
+    let manifest_digest: [u8; 32] = Sha256::digest(&bundle.signed_build_manifest).into();
     let minimum = semver::Version::parse(&policy.minimum_agent_version)
         .map_err(|_| ProtocolError::InvalidField("minimum_agent_version"))?;
     let current = semver::Version::parse(current_agent_version)
@@ -313,6 +491,11 @@ pub fn verify_launch_bundle(
         || policy.game_id != grant.game_id
         || policy.environment_id != grant.environment_id
         || grant.policy_digest.as_slice() != Sha256::digest(&bundle.signed_policy).as_slice()
+        || grant.build_manifest_digest.as_slice() != manifest_digest
+        || manifest.tenant_id != grant.tenant_id
+        || manifest.game_id != grant.game_id
+        || manifest.environment_id != grant.environment_id
+        || manifest.build_id != grant.build_id
     {
         return Err(ProtocolError::InvalidField("launch_binding"));
     }
@@ -328,8 +511,13 @@ pub fn verify_launch_bundle(
         match_id: grant.match_id,
         build_id: grant.build_id,
         authoritative_server_id: grant.authoritative_server_id,
+        build_manifest: manifest,
+        build_manifest_digest: manifest_digest,
+        heartbeat_seconds: policy.heartbeat_seconds,
         report_seconds: policy.report_seconds,
         disconnect_grace_seconds: policy.disconnect_grace_seconds,
+        policy_expires_at_unix: policy.expires_at_unix,
+        grant_expires_at_unix: grant.expires_at_unix,
     })
 }
 
@@ -411,6 +599,7 @@ fn validate_launch_grant(
         || !identifier(&claims.authoritative_server_id)
         || claims.agent_public_key.len() != 32
         || claims.policy_digest.len() != 32
+        || claims.build_manifest_digest.len() != 32
         || claims.issued_at_unix > now_unix + 30
         || claims.expires_at_unix <= claims.issued_at_unix
         || claims.expires_at_unix - claims.issued_at_unix > 120
@@ -421,6 +610,78 @@ fn validate_launch_grant(
         return Err(ProtocolError::Expired);
     }
     Ok(())
+}
+
+fn validate_build_manifest(
+    claims: &BuildManifestClaimsV1,
+    now_unix: i64,
+) -> Result<(), ProtocolError> {
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.manifest_id)
+        || !identifier(&claims.tenant_id)
+        || !identifier(&claims.game_id)
+        || !identifier(&claims.environment_id)
+        || !identifier(&claims.build_id)
+        || claims.files.is_empty()
+        || claims.files.len() > 16_384
+        || claims.not_before_unix > now_unix + 30
+        || claims.expires_at_unix <= now_unix
+        || claims.expires_at_unix <= claims.not_before_unix
+    {
+        return Err(ProtocolError::InvalidField("build_manifest"));
+    }
+    let mut paths = std::collections::BTreeSet::new();
+    if claims.files.iter().any(|file| {
+        !safe_relative_path(&file.path)
+            || file.sha256.len() != 32
+            || !paths.insert(file.path.to_ascii_lowercase())
+    }) {
+        return Err(ProtocolError::InvalidField("build_manifest_file"));
+    }
+    Ok(())
+}
+
+fn validate_game_registration(
+    claims: &GameRegistrationClaimsV1,
+    now_unix: i64,
+) -> Result<(), ProtocolError> {
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.registration_id)
+        || !identifier(&claims.publisher_id)
+        || !identifier(&claims.tenant_id)
+        || !identifier(&claims.game_id)
+        || !identifier(&claims.environment_id)
+        || !safe_relative_path(&claims.executable_relative_path)
+        || claims.trust_store_sha256.len() != 32
+        || claims.update_root_sha256.len() != 32
+        || !https_url(&claims.update_metadata_url)
+        || !https_url(&claims.update_targets_url)
+        || !matches!(claims.update_channel.as_str(), "stable" | "beta")
+        || claims.not_before_unix > now_unix + 30
+        || claims.expires_at_unix <= now_unix
+        || claims.expires_at_unix <= claims.not_before_unix
+    {
+        return Err(ProtocolError::InvalidField("game_registration"));
+    }
+    Ok(())
+}
+
+fn safe_relative_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && !value.starts_with('/')
+        && !value.starts_with('\\')
+        && !(value.len() >= 2 && value.as_bytes()[1] == b':')
+        && value
+            .split(['/', '\\'])
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn https_url(value: &str) -> bool {
+    value.len() <= 2048
+        && value.starts_with("https://")
+        && value[8..].contains('.')
+        && !value.chars().any(char::is_control)
 }
 
 fn identifier(value: &str) -> bool {
@@ -580,6 +841,7 @@ mod tests {
             expires_at_unix: 1_700_000_060,
             policy_digest: vec![4; 32],
             authoritative_server_id: "server-1".into(),
+            build_manifest_digest: vec![5; 32],
         };
         let encoded = claims.encode_to_vec();
         let mut message = LAUNCH_DOMAIN.to_vec();
@@ -668,6 +930,31 @@ mod tests {
             key_id: "root-1".into(),
         }
         .encode_to_vec();
+        let manifest_claims = BuildManifestClaimsV1 {
+            protocol_version: 1,
+            manifest_id: "manifest".into(),
+            tenant_id: "tenant".into(),
+            game_id: "game".into(),
+            environment_id: "prod".into(),
+            build_id: "build".into(),
+            files: vec![ProtectedBuildFileV1 {
+                path: "game.exe".into(),
+                size: 100,
+                sha256: vec![7; 32],
+            }],
+            not_before_unix: 1_699_999_000,
+            expires_at_unix: 1_700_003_600,
+        };
+        let manifest_claim_bytes = manifest_claims.encode_to_vec();
+        let manifest = SignedBuildManifestV1 {
+            signature: root
+                .sign(&[BUILD_MANIFEST_DOMAIN, &manifest_claim_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            claims: manifest_claim_bytes,
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
         let grant_claims = AgentLaunchGrantClaimsV1 {
             protocol_version: 1,
             grant_id: "session".into(),
@@ -682,6 +969,7 @@ mod tests {
             expires_at_unix: 1_700_000_060,
             policy_digest: Sha256::digest(&policy).to_vec(),
             authoritative_server_id: "server".into(),
+            build_manifest_digest: Sha256::digest(&manifest).to_vec(),
         };
         let grant_claim_bytes = grant_claims.encode_to_vec();
         let grant = SignedAgentLaunchGrantV1 {
@@ -696,6 +984,7 @@ mod tests {
         let bundle = AgentLaunchBundleV1 {
             signed_policy: policy,
             signed_launch_grant: grant.clone(),
+            signed_build_manifest: manifest.clone(),
         }
         .encode_to_vec();
         assert_eq!(
@@ -754,6 +1043,7 @@ mod tests {
         let mismatched_bundle = AgentLaunchBundleV1 {
             signed_policy: other_tenant_policy,
             signed_launch_grant: mismatch_grant,
+            signed_build_manifest: manifest,
         }
         .encode_to_vec();
         assert_eq!(
@@ -852,8 +1142,9 @@ mod tests {
             expires_at_unix: 1_700_000_060,
             policy_digest: Sha256::digest(signed_policy).to_vec(),
             authoritative_server_id: "server".into(),
+            build_manifest_digest: vec![5; 32],
         };
         let encoded = claims.encode_to_vec();
-        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa066220947cc7a0c10233b2ff5c0aae415b2e37cfc97915e5747edcc3eb8245f600f4406a06736572766572");
+        assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa066220947cc7a0c10233b2ff5c0aae415b2e37cfc97915e5747edcc3eb8245f600f4406a0673657276657272200505050505050505050505050505050505050505050505050505050505050505");
     }
 }

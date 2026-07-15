@@ -20,11 +20,14 @@ then executes that immutable version. Incomplete temporary directories are not
 eligible slots, invalid pending versions are discarded during recovery, and an
 invalid active version can only fall back to a still-valid previous slot.
 
-Use `certael-agent update` with the separately distributed TUF root and HTTPS
-metadata/target endpoints to verify and stage a pending version. Inspect it with
-`update-status`, then use `activate-update` for the next launch. If operational
+Normal users run `update-registered-game --registration-id ID --activate` or
+use the GUI. The Agent derives the HTTPS endpoints, channel, target, and TUF
+root from the signed game registration and rejects cross-channel targets. The
+lower-level `update` command remains for release engineering. Inspect an install
+with `update-status`, then use `activate-update` for the next launch. If operational
 checks fail, `rollback-update` atomically selects the prior verified slot.
 
-Authenticode/Developer ID signing, packaged platform installers, upgrade chaos
-tests, and the exercised offline 2-of-3 TUF root ceremony remain release gates
-in `ROADMAP.md`.
+Stable `v1.*` workflows fail unless Windows Authenticode and macOS Developer ID
+signing/notarization credentials are available. Archives are checksummed,
+SBOM-attached, provenance-attested, and keyless-signed. The offline 2-of-3 TUF
+root ceremony remains an operator release gate.

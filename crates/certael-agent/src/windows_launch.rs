@@ -148,13 +148,13 @@ pub fn launch(game: PathBuf, args: Vec<String>, mut state: RuntimeState) -> Resu
         });
     }
     state.game_process_id = process.dwProcessId;
+    state.game_process_identity = certael_agent_platform::process_identity(process.dwProcessId);
     drop(game_read);
     drop(game_write);
 
     let mut outbound = unsafe { std::fs::File::from_raw_handle(agent_write.take() as *mut _) };
     let mut inbound = unsafe { std::fs::File::from_raw_handle(agent_read.take() as *mut _) };
-    runtime::serve(&mut inbound, &mut outbound, &state)
-        .context("protected Agent session failed")?;
+    runtime::serve(inbound, &mut outbound, &state).context("protected Agent session failed")?;
     drop(outbound);
     drop(inbound);
 
@@ -218,24 +218,36 @@ fn clear_inheritance(handle: HANDLE) -> Result<()> {
 }
 
 fn environment_block(read: HANDLE, write: HANDLE) -> Result<Vec<u16>> {
-    let mut values: Vec<(String, String)> = std::env::vars_os()
+    let values: Vec<(String, String)> = std::env::vars_os()
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
-        .filter(|(key, _)| {
-            key != "CERTAEL_AGENT_READ_HANDLE" && key != "CERTAEL_AGENT_WRITE_HANDLE"
-        })
         .collect();
-    values.push((
-        "CERTAEL_AGENT_READ_HANDLE".into(),
-        (read as usize).to_string(),
-    ));
-    values.push((
-        "CERTAEL_AGENT_WRITE_HANDLE".into(),
-        (write as usize).to_string(),
-    ));
+    environment_block_from(values, read as usize, write as usize)
+}
+
+fn environment_block_from(
+    mut values: Vec<(String, String)>,
+    read: usize,
+    write: usize,
+) -> Result<Vec<u16>> {
+    values.retain(|(key, _)| {
+        !key.eq_ignore_ascii_case("CERTAEL_AGENT_READ_HANDLE")
+            && !key.eq_ignore_ascii_case("CERTAEL_AGENT_WRITE_HANDLE")
+    });
+    values.push(("CERTAEL_AGENT_READ_HANDLE".into(), read.to_string()));
+    values.push(("CERTAEL_AGENT_WRITE_HANDLE".into(), write.to_string()));
     values.sort_by_key(|(key, _)| key.to_uppercase());
     let mut block = Vec::new();
     for (key, value) in values {
-        if key.contains('=') || key.contains('\0') || value.contains('\0') {
+        // Windows uses special entries such as `=C:=C:\\directory` to carry
+        // each drive's current directory into a child process. They are part
+        // of the environment block even though ordinary variable names may
+        // not contain `=`.
+        let drive_current_directory = is_drive_current_directory_key(&key);
+        if key.is_empty()
+            || (!drive_current_directory && key.contains('='))
+            || key.contains('\0')
+            || value.contains('\0')
+        {
             bail!("process environment contains an invalid entry");
         }
         block.extend(OsStr::new(&format!("{key}={value}")).encode_wide());
@@ -243,6 +255,11 @@ fn environment_block(read: HANDLE, write: HANDLE) -> Result<Vec<u16>> {
     }
     block.push(0);
     Ok(block)
+}
+
+fn is_drive_current_directory_key(key: &str) -> bool {
+    let bytes = key.as_bytes();
+    bytes.len() == 3 && bytes[0] == b'=' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 fn windows_command_line(game: &Path, args: &[String]) -> String {
@@ -322,11 +339,52 @@ impl Drop for AttributeList {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn decode_environment_block(block: &[u16]) -> Vec<String> {
+        block[..block.len() - 1]
+            .split(|word| *word == 0)
+            .map(String::from_utf16)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .expect("environment block should contain valid UTF-16")
+    }
+
     #[test]
     fn quotes_windows_arguments() {
         assert_eq!(quote("plain"), "plain");
         assert_eq!(quote("two words"), "\"two words\"");
         assert_eq!(quote("a\\\"b"), "\"a\\\\\\\"b\"");
         assert_eq!(quote("trailing\\"), "trailing\\");
+    }
+
+    #[test]
+    fn preserves_drive_current_directories() {
+        let block = environment_block_from(
+            vec![
+                ("Path".into(), r"C:\Windows\System32".into()),
+                ("=C:".into(), r"C:\Games\Certael".into()),
+                ("certael_agent_read_handle".into(), "attacker".into()),
+            ],
+            123,
+            456,
+        )
+        .expect("Windows drive-current-directory entries should be accepted");
+        let entries = decode_environment_block(&block);
+
+        assert!(entries.contains(&r"=C:=C:\Games\Certael".to_owned()));
+        assert!(entries.contains(&"CERTAEL_AGENT_READ_HANDLE=123".to_owned()));
+        assert!(entries.contains(&"CERTAEL_AGENT_WRITE_HANDLE=456".to_owned()));
+        assert!(!entries.iter().any(|entry| entry.ends_with("=attacker")));
+        assert_eq!(block.last(), Some(&0));
+        assert_eq!(block[block.len() - 2], 0);
+    }
+
+    #[test]
+    fn rejects_other_equals_signs_in_environment_keys() {
+        for key in ["", "INVALID=KEY", "=CC:", "=C:extra", "=1:", "="] {
+            assert!(
+                environment_block_from(vec![(key.into(), "value".into())], 123, 456).is_err(),
+                "unexpectedly accepted environment key {key:?}"
+            );
+        }
     }
 }

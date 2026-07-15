@@ -34,6 +34,34 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo test --workspace --locked
       - run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Require and apply Windows production signatures
+        if: runner.os == 'Windows' && startsWith(github.ref_name, 'v1.')
+        shell: pwsh
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_AUTHENTICODE_PFX_PASSWORD }}
+        run: |
+          ./scripts/sign-windows.ps1 `
+            -CertificateBase64 $env:CERTIFICATE_BASE64 `
+            -CertificatePassword $env:CERTIFICATE_PASSWORD `
+            -Files @(
+              "target/${{ matrix.target }}/release/certael-agent.exe",
+              "target/${{ matrix.target }}/release/certael-agent-launcher.exe",
+              "target/${{ matrix.target }}/release/certael_agent_probe.dll"
+            )
+      - name: Require and apply macOS production signatures
+        if: runner.os == 'macOS' && startsWith(github.ref_name, 'v1.')
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+          MACOS_APPLICATION_IDENTITY: ${{ secrets.MACOS_APPLICATION_IDENTITY }}
+        run: |
+          ./scripts/sign-macos.sh \
+            "target/${{ matrix.target }}/release/certael-agent" \
+            "target/${{ matrix.target }}/release/certael-agent-launcher" \
+            "target/${{ matrix.target }}/release/libcertael_agent_probe.dylib"
       - name: Package Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -48,6 +76,21 @@ jobs:
           mkdir -p dist/docs
           cp docs/INSTALLING.md docs/UPDATES.md docs/TUF-CEREMONY.md dist/docs/
           tar -C dist -czf "${{ matrix.artifact }}.tar.gz" .
+      - name: Notarize stable macOS archive
+        if: runner.os == 'macOS' && startsWith(github.ref_name, 'v1.')
+        shell: bash
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          : "${APPLE_ID:?Stable macOS releases require an Apple ID}"
+          : "${APPLE_TEAM_ID:?Stable macOS releases require an Apple team ID}"
+          : "${APPLE_APP_PASSWORD:?Stable macOS releases require an app password}"
+          ditto -c -k --keepParent dist "${{ matrix.artifact }}.zip"
+          xcrun notarytool submit "${{ matrix.artifact }}.zip" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" --wait
       - name: Smoke packaged Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -123,6 +166,12 @@ jobs:
           done
       - uses: actions/attest-build-provenance@43d14bc2b83dec42d39ecae14e916627a18bb661 # v3
         with: { subject-path: "release/**" }
-      - name: Publish pre-release
+      - name: Publish release
         env: { GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
-        run: gh release create "$GITHUB_REF_NAME" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --generate-notes
+        run: |
+          set -euo pipefail
+          flags=(--repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes)
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" release/* "${flags[@]}"

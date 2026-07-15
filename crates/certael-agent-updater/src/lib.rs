@@ -49,6 +49,14 @@ pub struct InstallConfig {
     pub installed_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedReleaseTarget {
+    pub path: PathBuf,
+    pub version: String,
+    pub channel: String,
+    pub platform: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationSlot {
@@ -81,6 +89,15 @@ impl Default for ActivationState {
 /// expiration, rollback state, target length, and target hashes before staging.
 /// This function never replaces a running executable.
 pub async fn verify_and_stage(config: &UpdateConfig) -> Result<PathBuf, UpdateError> {
+    Ok(verify_and_stage_release(config).await?.path)
+}
+
+/// Stages a target and returns its signed release identity from TUF custom
+/// metadata. Version, channel, and platform are never accepted from an
+/// unsigned command-line value.
+pub async fn verify_and_stage_release(
+    config: &UpdateConfig,
+) -> Result<VerifiedReleaseTarget, UpdateError> {
     validate(config)?;
     let metadata = tokio::fs::metadata(&config.trusted_root)
         .await
@@ -117,17 +134,55 @@ pub async fn verify_and_stage(config: &UpdateConfig) -> Result<PathBuf, UpdateEr
     .map_err(|_| UpdateError::Verification)?;
     let target =
         TargetName::new(&config.target_name).map_err(|_| UpdateError::InvalidConfiguration)?;
-    if repository
+    let metadata = repository
         .all_targets()
-        .all(|(candidate, _)| candidate != &target)
-    {
-        return Err(UpdateError::TargetMissing);
-    }
+        .find_map(|(candidate, metadata)| (candidate == &target).then_some(metadata))
+        .ok_or(UpdateError::TargetMissing)?;
+    let custom_string = |name: &str| {
+        metadata
+            .custom
+            .get(name)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| safe_component(value))
+            .map(str::to_owned)
+            .ok_or(UpdateError::Verification)
+    };
+    let version = custom_string("version")?;
+    let channel = custom_string("channel")?;
+    let platform = custom_string("platform")?;
     repository
         .save_target(&target, &config.staging_directory, Prefix::None)
         .await
         .map_err(|_| UpdateError::Verification)?;
-    Ok(config.staging_directory.join(target.resolved()))
+    Ok(VerifiedReleaseTarget {
+        path: config.staging_directory.join(target.resolved()),
+        version,
+        channel,
+        platform,
+    })
+}
+
+pub async fn verify_stage_and_install_automatic(
+    update: &UpdateConfig,
+    install_root: &Path,
+    installed_name: &str,
+    expected_channel: &str,
+    expected_platform: &str,
+) -> Result<PathBuf, UpdateError> {
+    let release = verify_and_stage_release(update).await?;
+    if release.channel != expected_channel || release.platform != expected_platform {
+        return Err(UpdateError::Verification);
+    }
+    let expected_sha256 = hash_file(&release.path)?;
+    install_verified_target(
+        &release.path,
+        &InstallConfig {
+            install_root: install_root.to_path_buf(),
+            version: release.version,
+            installed_name: installed_name.to_owned(),
+        },
+        &expected_sha256,
+    )
 }
 
 /// Verifies a TUF target, copies it into an immutable version directory, and

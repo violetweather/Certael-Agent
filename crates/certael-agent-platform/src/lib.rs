@@ -198,6 +198,14 @@ pub fn validate_game_path(path: &Path) -> Result<PathBuf> {
 /// refers to the approved executable. The relationship is advisory user-mode
 /// evidence; it is not a trust boundary.
 pub fn inspect_game_process(process_id: u32, expected_path: &Path) -> GameProcessSnapshot {
+    inspect_game_process_bound(process_id, expected_path, None)
+}
+
+pub fn inspect_game_process_bound(
+    process_id: u32,
+    expected_path: &Path,
+    expected_identity: Option<u64>,
+) -> GameProcessSnapshot {
     if process_id == 0 {
         return GameProcessSnapshot {
             running: false,
@@ -207,7 +215,55 @@ pub fn inspect_game_process(process_id: u32, expected_path: &Path) -> GameProces
             process_identity_stable: None,
         };
     }
-    inspect_game_process_platform(process_id, expected_path)
+    let mut snapshot = inspect_game_process_platform(process_id, expected_path);
+    snapshot.process_identity_stable = expected_identity
+        .map(|expected| process_identity(process_id) == Some(expected))
+        .or(snapshot.process_identity_stable);
+    snapshot
+}
+
+pub fn process_identity(process_id: u32) -> Option<u64> {
+    (process_id != 0)
+        .then(|| process_identity_platform(process_id))
+        .flatten()
+}
+
+#[cfg(target_os = "linux")]
+fn process_identity_platform(process_id: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{process_id}/stat")).ok()?;
+    let after_name = stat.rsplit_once(')')?.1.trim_start();
+    after_name.split_whitespace().nth(19)?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_identity_platform(process_id: u32) -> Option<u64> {
+    macos_process_times(process_id).map(|(seconds, micros)| seconds ^ micros.rotate_left(32))
+}
+
+#[cfg(target_os = "windows")]
+fn process_identity_platform(process_id: u32) -> Option<u64> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, FILETIME},
+        System::Threading::{GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+    };
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        return None;
+    }
+    let mut creation = FILETIME::default();
+    let mut exit = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let success =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+    unsafe { CloseHandle(process) };
+    success
+        .then_some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+fn process_identity_platform(_process_id: u32) -> Option<u64> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -483,6 +539,16 @@ fn windows_process_modules(process_id: u32) -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn macos_process_parent(process_id: u32) -> Option<u32> {
+    macos_process_info(process_id).map(|info| info.pbi_ppid)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_times(process_id: u32) -> Option<(u64, u64)> {
+    macos_process_info(process_id).map(|info| (info.pbi_start_tvsec, info.pbi_start_tvusec))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_process_info(process_id: u32) -> Option<MacProcBsdInfo> {
     #[repr(C)]
     struct ProcBsdInfo {
         pbi_flags: u32,
@@ -530,7 +596,18 @@ fn macos_process_parent(process_id: u32) -> Option<u32> {
             expected as libc::c_int,
         )
     };
-    (read == expected as libc::c_int).then_some(info.pbi_ppid)
+    (read == expected as libc::c_int).then_some(MacProcBsdInfo {
+        pbi_ppid: info.pbi_ppid,
+        pbi_start_tvsec: info.pbi_start_tvsec,
+        pbi_start_tvusec: info.pbi_start_tvusec,
+    })
+}
+
+#[cfg(target_os = "macos")]
+struct MacProcBsdInfo {
+    pbi_ppid: u32,
+    pbi_start_tvsec: u64,
+    pbi_start_tvusec: u64,
 }
 
 #[cfg(target_os = "macos")]
