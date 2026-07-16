@@ -419,6 +419,14 @@ pub struct SignedAgentRevocationV1 {
 pub enum ProtocolError {
     #[error("message exceeds the 64 KiB protocol limit")]
     TooLarge,
+    #[error("message is empty")]
+    Empty,
+    #[error("invalid launch bundle component `{component}`: {source}")]
+    LaunchBundleComponent {
+        component: &'static str,
+        #[source]
+        source: Box<ProtocolError>,
+    },
     #[error("invalid public key or signature")]
     InvalidSignature,
     #[error("invalid protocol field: {0}")]
@@ -705,12 +713,18 @@ pub fn verify_launch_bundle(
     current_agent_version: &str,
 ) -> Result<BoundAgentLaunch, ProtocolError> {
     let bundle: AgentLaunchBundleV1 = decode_canonical(input)?;
-    let policy_envelope: SignedAgentPolicyV1 = decode_canonical(&bundle.signed_policy)?;
-    let grant_envelope: SignedAgentLaunchGrantV1 = decode_canonical(&bundle.signed_launch_grant)?;
-    let manifest_envelope: SignedBuildManifestV1 = decode_canonical(&bundle.signed_build_manifest)?;
-    let policy = verify_policy(&policy_envelope, keys, now_unix)?;
-    let grant = verify_launch_grant(&grant_envelope, keys, now_unix)?;
-    let manifest = verify_build_manifest(&manifest_envelope, keys, now_unix)?;
+    let policy_envelope: SignedAgentPolicyV1 = decode_canonical(&bundle.signed_policy)
+        .map_err(|source| launch_component_error("signed_policy", source))?;
+    let grant_envelope: SignedAgentLaunchGrantV1 = decode_canonical(&bundle.signed_launch_grant)
+        .map_err(|source| launch_component_error("signed_launch_grant", source))?;
+    let manifest_envelope: SignedBuildManifestV1 = decode_canonical(&bundle.signed_build_manifest)
+        .map_err(|source| launch_component_error("signed_build_manifest", source))?;
+    let policy = verify_policy(&policy_envelope, keys, now_unix)
+        .map_err(|source| launch_component_error("policy_claims", source))?;
+    let grant = verify_launch_grant(&grant_envelope, keys, now_unix)
+        .map_err(|source| launch_component_error("launch_grant_claims", source))?;
+    let manifest = verify_build_manifest(&manifest_envelope, keys, now_unix)
+        .map_err(|source| launch_component_error("build_manifest_claims", source))?;
     let manifest_digest: [u8; 32] = Sha256::digest(&bundle.signed_build_manifest).into();
     let minimum = semver::Version::parse(&policy.minimum_agent_version)
         .map_err(|_| ProtocolError::InvalidField("minimum_agent_version"))?;
@@ -769,7 +783,10 @@ pub fn decode_challenge(
 }
 
 fn decode_canonical<M: Message + Default>(input: &[u8]) -> Result<M, ProtocolError> {
-    if input.is_empty() || input.len() > MAX_MESSAGE_BYTES {
+    if input.is_empty() {
+        return Err(ProtocolError::Empty);
+    }
+    if input.len() > MAX_MESSAGE_BYTES {
         return Err(ProtocolError::TooLarge);
     }
     let value = M::decode(input).map_err(|_| ProtocolError::Decode)?;
@@ -777,6 +794,13 @@ fn decode_canonical<M: Message + Default>(input: &[u8]) -> Result<M, ProtocolErr
         return Err(ProtocolError::NonCanonical);
     }
     Ok(value)
+}
+
+fn launch_component_error(component: &'static str, source: ProtocolError) -> ProtocolError {
+    ProtocolError::LaunchBundleComponent {
+        component,
+        source: Box::new(source),
+    }
 }
 
 fn verify_signed_bytes(
@@ -1110,6 +1134,83 @@ mod tests {
             revoked: false,
         }])
         .unwrap()
+    }
+
+    #[test]
+    fn empty_messages_are_not_reported_as_oversized() {
+        assert_eq!(
+            decode_canonical::<AgentLaunchBundleV1>(&[]),
+            Err(ProtocolError::Empty)
+        );
+        assert_eq!(ProtocolError::Empty.to_string(), "message is empty");
+    }
+
+    #[test]
+    fn launch_bundle_errors_identify_the_failing_component() {
+        let root = SigningKey::generate(&mut OsRng);
+        let missing_policy = AgentLaunchBundleV1 {
+            signed_policy: vec![],
+            signed_launch_grant: vec![1],
+            signed_build_manifest: vec![1],
+        }
+        .encode_to_vec();
+        let error = verify_launch_bundle(
+            &missing_policy,
+            &key_ring(&root),
+            1_700_000_000,
+            &[0; 32],
+            "build",
+            "0.3.0-alpha.1",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ProtocolError::LaunchBundleComponent {
+                component: "signed_policy",
+                source: Box::new(ProtocolError::Empty),
+            }
+        );
+
+        let empty_policy_claims = SignedAgentPolicyV1 {
+            claims: vec![],
+            signature: vec![0; 64],
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let empty_grant_claims = SignedAgentLaunchGrantV1 {
+            claims: vec![],
+            signature: vec![0; 64],
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let empty_manifest_claims = SignedBuildManifestV1 {
+            claims: vec![],
+            signature: vec![0; 64],
+            key_id: "root-1".into(),
+        }
+        .encode_to_vec();
+        let bundle = AgentLaunchBundleV1 {
+            signed_policy: empty_policy_claims,
+            signed_launch_grant: empty_grant_claims,
+            signed_build_manifest: empty_manifest_claims,
+        }
+        .encode_to_vec();
+        let error = verify_launch_bundle(
+            &bundle,
+            &key_ring(&root),
+            1_700_000_000,
+            &[0; 32],
+            "build",
+            "0.3.0-alpha.1",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ProtocolError::LaunchBundleComponent {
+                component: "policy_claims",
+                source: Box::new(ProtocolError::Empty),
+            }
+        );
     }
 
     #[test]
