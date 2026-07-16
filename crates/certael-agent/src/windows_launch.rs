@@ -1,4 +1,7 @@
-use crate::runtime::{self, RuntimeState};
+use crate::{
+    runtime::{self, RuntimeState},
+    windows_environment::sanitize_environment_entries,
+};
 use anyhow::{bail, Context, Result};
 use std::{
     ffi::OsStr,
@@ -224,41 +227,17 @@ fn environment_block(read: HANDLE, write: HANDLE) -> Result<Vec<u16>> {
 }
 
 fn environment_block_from(
-    mut values: Vec<(String, String)>,
+    values: Vec<(String, String)>,
     read: usize,
     write: usize,
 ) -> Result<Vec<u16>> {
-    values.retain(|(key, _)| {
-        !key.eq_ignore_ascii_case("CERTAEL_AGENT_READ_HANDLE")
-            && !key.eq_ignore_ascii_case("CERTAEL_AGENT_WRITE_HANDLE")
-    });
-    values.push(("CERTAEL_AGENT_READ_HANDLE".into(), read.to_string()));
-    values.push(("CERTAEL_AGENT_WRITE_HANDLE".into(), write.to_string()));
-    values.sort_by_key(|(key, _)| key.to_uppercase());
     let mut block = Vec::new();
-    for (key, value) in values {
-        // Windows uses special entries such as `=C:=C:\\directory` to carry
-        // each drive's current directory into a child process. They are part
-        // of the environment block even though ordinary variable names may
-        // not contain `=`.
-        let drive_current_directory = is_drive_current_directory_key(&key);
-        if key.is_empty()
-            || (!drive_current_directory && key.contains('='))
-            || key.contains('\0')
-            || value.contains('\0')
-        {
-            bail!("process environment contains an invalid entry");
-        }
+    for (key, value) in sanitize_environment_entries(values, read, write)? {
         block.extend(OsStr::new(&format!("{key}={value}")).encode_wide());
         block.push(0);
     }
     block.push(0);
     Ok(block)
-}
-
-fn is_drive_current_directory_key(key: &str) -> bool {
-    let bytes = key.as_bytes();
-    bytes.len() == 3 && bytes[0] == b'=' && bytes[1].is_ascii_alphabetic() && bytes[2] == b':'
 }
 
 fn windows_command_line(game: &Path, args: &[String]) -> String {
@@ -375,15 +354,5 @@ mod tests {
         assert!(!entries.iter().any(|entry| entry.ends_with("=attacker")));
         assert_eq!(block.last(), Some(&0));
         assert_eq!(block[block.len() - 2], 0);
-    }
-
-    #[test]
-    fn rejects_other_equals_signs_in_environment_keys() {
-        for key in ["", "INVALID=KEY", "=CC:", "=C:extra", "=1:", "="] {
-            assert!(
-                environment_block_from(vec![(key.into(), "value".into())], 123, 456).is_err(),
-                "unexpectedly accepted environment key {key:?}"
-            );
-        }
     }
 }

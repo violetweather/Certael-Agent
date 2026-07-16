@@ -22,6 +22,8 @@ mod runtime;
 mod status;
 mod trust;
 mod ui;
+#[cfg(any(windows, test))]
+mod windows_environment;
 #[cfg(windows)]
 mod windows_launch;
 
