@@ -15,7 +15,7 @@ use prost::Message;
 use std::{
     io::{Read, Write},
     path::PathBuf,
-    sync::mpsc,
+    sync::mpsc::{self, RecvTimeoutError},
     thread,
     time::Duration,
     time::{SystemTime, UNIX_EPOCH},
@@ -78,11 +78,54 @@ pub fn serve(
             }
         })
         .context("failed to start bounded Agent channel reader")?;
-    let bootstrap = incoming
-        .recv_timeout(Duration::from_secs(15))
-        .context("protected game did not provide Agent admission in time")?
-        .context("protected game closed before Agent admission")?;
+    let bootstrap = match incoming.recv_timeout(Duration::from_secs(15)) {
+        Ok(Ok(frame)) => frame,
+        Ok(Err(error)) => {
+            let _ = write_health(
+                &mut writer,
+                "unbound",
+                "rejected",
+                0,
+                &["AGENT_ADMISSION_CHANNEL_FAILED"],
+            );
+            return Err(error).context("protected game channel failed before Agent admission");
+        }
+        Err(RecvTimeoutError::Timeout) => {
+            let _ = write_health(
+                &mut writer,
+                "unbound",
+                "rejected",
+                0,
+                &["AGENT_ADMISSION_TIMEOUT"],
+            );
+            bail!("protected game did not provide Agent admission in time");
+        }
+        Err(RecvTimeoutError::Disconnected) => {
+            let _ = write_health(
+                &mut writer,
+                "unbound",
+                "rejected",
+                0,
+                &["AGENT_ADMISSION_CHANNEL_CLOSED"],
+            );
+            bail!("protected game channel closed before Agent admission");
+        }
+    };
+    eprintln!(
+        "Certael Agent admission: agent_pid={} game_pid={} build_id={} payload_bytes={}",
+        std::process::id(),
+        state.game_process_id,
+        state.hello.build_id,
+        bootstrap.payload.len()
+    );
     if bootstrap.message_type != MessageType::LaunchGrant {
+        let _ = write_health(
+            &mut writer,
+            "unbound",
+            "rejected",
+            0,
+            &["AGENT_ADMISSION_TYPE_INVALID"],
+        );
         bail!("protected game did not provide a signed Agent launch bundle");
     }
     let public_key = state.key.verifying_key().to_bytes();
@@ -97,6 +140,13 @@ pub fn serve(
         Ok(launch) => launch,
         Err(ProtocolError::InvalidField("agent_update_required")) => {
             publish_runtime(state, "update_required", Some("AGENT_UPDATE_REQUIRED"));
+            let _ = write_health(
+                &mut writer,
+                "unbound",
+                "update_required",
+                0,
+                &["AGENT_UPDATE_REQUIRED"],
+            );
             if let Some(update) = &state.automatic_update {
                 publish_runtime(state, "updating", Some("AGENT_UPDATE_REQUIRED"));
                 let runtime = tokio::runtime::Runtime::new()
@@ -125,13 +175,29 @@ pub fn serve(
             }
             bail!("Agent update is required before protected launch");
         }
-        Err(error) => return Err(error).context("signed Agent launch bundle was rejected"),
+        Err(error) => {
+            let _ = write_health(
+                &mut writer,
+                "unbound",
+                "rejected",
+                0,
+                &["AGENT_LAUNCH_BUNDLE_REJECTED"],
+            );
+            return Err(error).context("signed Agent launch bundle was rejected");
+        }
     };
     if state.registration.as_ref().is_some_and(|registration| {
         registration.tenant_id != launch.tenant_id
             || registration.game_id != launch.game_id
             || registration.environment_id != launch.environment_id
     }) {
+        let _ = write_health(
+            &mut writer,
+            &launch.session_id,
+            "rejected",
+            0,
+            &["AGENT_REGISTRATION_MISMATCH"],
+        );
         bail!("signed launch bundle does not match the registered game");
     }
     let manifest = ProtectedBuildManifest {
@@ -147,11 +213,35 @@ pub fn serve(
             })
             .collect(),
     };
-    let mismatches = verify_files(&state.game_root, &manifest)
-        .context("protected build manifest could not be verified")?;
+    let mismatches = match verify_files(&state.game_root, &manifest) {
+        Ok(mismatches) => mismatches,
+        Err(error) => {
+            let _ = write_health(
+                &mut writer,
+                &launch.session_id,
+                "rejected",
+                0,
+                &["AGENT_MANIFEST_VERIFICATION_FAILED"],
+            );
+            return Err(error).context("protected build manifest could not be verified");
+        }
+    };
     if !mismatches.is_empty() {
+        let _ = write_health(
+            &mut writer,
+            &launch.session_id,
+            "rejected",
+            0,
+            &["AGENT_BUILD_MISMATCH"],
+        );
         bail!("protected build does not match its signed manifest");
     }
+    eprintln!(
+        "Certael Agent admission accepted: agent_pid={} game_pid={} session_id={}",
+        std::process::id(),
+        state.game_process_id,
+        launch.session_id
+    );
     write_health(&mut writer, &launch.session_id, "ready", 0, &[])?;
     publish_runtime(state, "protected", None);
     let mut sequence = 1_u64;
@@ -441,6 +531,28 @@ mod tests {
     use rand_core::OsRng;
     use sha2::{Digest, Sha256};
     use std::io::Cursor;
+
+    #[test]
+    fn health_messages_use_canonical_default_omission_and_preserve_reasons() {
+        let mut output = Vec::new();
+        write_health(
+            &mut output,
+            "unbound",
+            "rejected",
+            0,
+            &["AGENT_LAUNCH_BUNDLE_REJECTED"],
+        )
+        .unwrap();
+        let frame = read_frame(&mut Cursor::new(output)).unwrap();
+        assert_eq!(frame.message_type, MessageType::Health);
+        let health = AgentHealthV1::decode(frame.payload.as_slice()).unwrap();
+        assert_eq!(health.agent_session_id, "unbound");
+        assert_eq!(health.state, "rejected");
+        assert_eq!(health.last_report_at_unix, 0);
+        assert_eq!(health.public_reasons, ["AGENT_LAUNCH_BUNDLE_REJECTED"]);
+        assert_eq!(health.encode_to_vec(), frame.payload);
+        assert!(!frame.payload.windows(2).any(|field| field == [0x18, 0x00]));
+    }
 
     #[test]
     fn serves_verified_bundle_and_returns_chained_signed_report() {

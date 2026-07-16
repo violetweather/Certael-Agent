@@ -21,6 +21,14 @@ inside the signed whole-build manifest.
 | `updating` | TUF metadata and target are being verified | Do not copy or replace Agent files |
 | `update_ready` | Verified immutable version is staged | Close and relaunch to activate |
 | `update_failed` | No safe update could be staged | Use **Check trusted update** or run repair as administrator |
+| `rejected` | Admission failed before protected play | Read the bounded public reason and correct the named registration, manifest, build, or channel problem |
+
+Starting with `v0.3.0-alpha.3`, the Agent sends a canonical rejection health
+frame before closing whenever the response channel remains usable. Local logs
+include Agent PID, game PID, build ID, admission payload length, and the bound
+session ID; signed launch payloads and private keys are never logged. Pair this
+release with Core `v0.3.0-alpha.2` or newer so canonical initial health messages
+whose zero timestamp is omitted are decoded correctly.
 
 For a signed registered game, `launch-game` derives the HTTPS repository,
 channel, target platform, update root, and state directory from that
@@ -42,7 +50,7 @@ The Agent CLI can independently verify the Core-compatible binary manifest:
 certael-agent compatibility-check \
   --manifest compatibility.pb \
   --trust-store compatibility-trust-store.json \
-  --product agent --version 0.3.0-alpha.2 --protocol 1
+  --product agent --version 0.3.0-alpha.3 --protocol 1
 ```
 
 The compatibility key is a dedicated offline release key. A game publisher's
