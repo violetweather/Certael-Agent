@@ -27,6 +27,15 @@ lower-level `update` command remains for release engineering. Inspect an install
 with `update-status`, then use `activate-update` for the next launch. If operational
 checks fail, `rollback-update` atomically selects the prior verified slot.
 
+During protected launch, a signed `agent_update_required` decision triggers the
+same TUF verification and immutable staging automatically for registered games.
+The live state progresses through `update_required`, `updating`, and
+`update_ready` (or `update_failed`). Activation remains a relaunch boundary so
+the running executable is never replaced. System-wide installations use the
+GUI's OS-native administrator approval flow (Windows UAC, macOS administrator
+authorization, or Linux PolicyKit) before writing the immutable install slot.
+See [COMPATIBILITY.md](COMPATIBILITY.md).
+
 Stable `v1.*` workflows fail unless Windows Authenticode and macOS Developer ID
 signing/notarization credentials are available. Archives are checksummed,
 SBOM-attached, provenance-attested, and keyless-signed. The offline 2-of-3 TUF

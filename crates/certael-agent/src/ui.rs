@@ -76,14 +76,27 @@ impl AgentApp {
                 return;
             }
         };
+        if command == "update-registered-game" {
+            match spawn_elevated_update(&executable, registration_id) {
+                Ok(()) => {
+                    self.action = Some(format!(
+                        "Checking trusted updates for {registration_id} with administrator approval…"
+                    ));
+                }
+                Err(_) => {
+                    self.action = Some(
+                        "The secure updater could not request administrator approval; run the Agent update command as administrator."
+                            .into(),
+                    );
+                }
+            }
+            return;
+        }
         let mut process = Command::new(executable);
         process
             .arg(command)
             .arg("--registration-id")
             .arg(registration_id);
-        if command == "update-registered-game" {
-            process.arg("--activate");
-        }
         match process.spawn() {
             Ok(_) => {
                 self.action = Some(if command == "launch-game" {
@@ -115,6 +128,65 @@ impl AgentApp {
             Err(_) => self.action = Some("Recovery failed to start; run as administrator.".into()),
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_elevated_update(executable: &std::path::Path, registration_id: &str) -> Result<()> {
+    Command::new("pkexec")
+        .arg(executable)
+        .arg("update-registered-game")
+        .arg("--registration-id")
+        .arg(registration_id)
+        .arg("--activate")
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_elevated_update(executable: &std::path::Path, registration_id: &str) -> Result<()> {
+    const SCRIPT: &str = r#"on run argv
+set commandText to quoted form of item 1 of argv & " update-registered-game --registration-id " & quoted form of item 2 of argv & " --activate"
+do shell script commandText with administrator privileges
+end run"#;
+    Command::new("/usr/bin/osascript")
+        .arg("-e")
+        .arg(SCRIPT)
+        .arg(executable)
+        .arg(registration_id)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_elevated_update(executable: &std::path::Path, registration_id: &str) -> Result<()> {
+    use std::{iter, os::windows::ffi::OsStrExt, ptr};
+    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+    let operation: Vec<u16> = "runas".encode_utf16().chain(iter::once(0)).collect();
+    let executable: Vec<u16> = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect();
+    let parameters: Vec<u16> =
+        format!("update-registered-game --registration-id \"{registration_id}\" --activate")
+            .encode_utf16()
+            .chain(iter::once(0))
+            .collect();
+    let result = unsafe {
+        ShellExecuteW(
+            ptr::null_mut(),
+            operation.as_ptr(),
+            executable.as_ptr(),
+            parameters.as_ptr(),
+            ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(anyhow!("administrator approval was denied or unavailable"));
+    }
+    Ok(())
 }
 
 impl eframe::App for AgentApp {

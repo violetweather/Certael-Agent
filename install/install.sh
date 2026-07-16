@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: sudo ./install.sh [--prefix /usr/local] [--version 0.2.0] [--registration FILE --publisher-trust-store FILE --update-root FILE --game-root DIR]" >&2
+  echo "Usage: sudo ./install.sh [--prefix /usr/local] [--version 0.3.0-alpha.1] [--registration FILE --publisher-trust-store FILE --update-root FILE --game-root DIR]" >&2
 }
 
 replace_link() {
@@ -13,7 +13,7 @@ replace_link() {
 }
 
 prefix=/usr/local
-version=0.2.0
+version=0.3.0-alpha.1
 registration= publisher_trust_store= update_root= game_root=
 while [[ $# -gt 0 ]]; do
   case "$1" in

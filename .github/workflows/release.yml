@@ -74,7 +74,8 @@ jobs:
           cp -R install dist/
           cp -R examples dist/
           mkdir -p dist/docs
-          cp docs/INSTALLING.md docs/UPDATES.md docs/TUF-CEREMONY.md dist/docs/
+          cp docs/INSTALLING.md docs/UPDATES.md docs/COMPATIBILITY.md docs/PROTOCOL.md \
+            docs/ENGINE-INTEGRATION.md docs/SECURITY-CONTRACT.md docs/TUF-CEREMONY.md dist/docs/
           tar -C dist -czf "${{ matrix.artifact }}.tar.gz" .
       - name: Notarize stable macOS archive
         if: runner.os == 'macOS' && startsWith(github.ref_name, 'v1.')
@@ -114,7 +115,7 @@ jobs:
           Copy-Item install -Destination dist/install -Recurse
           Copy-Item examples -Destination dist/examples -Recurse
           New-Item -ItemType Directory -Force dist/docs
-          Copy-Item docs/INSTALLING.md,docs/UPDATES.md,docs/TUF-CEREMONY.md dist/docs/
+          Copy-Item docs/INSTALLING.md,docs/UPDATES.md,docs/COMPATIBILITY.md,docs/PROTOCOL.md,docs/ENGINE-INTEGRATION.md,docs/SECURITY-CONTRACT.md,docs/TUF-CEREMONY.md dist/docs/
           Compress-Archive -Path dist/* -DestinationPath "${{ matrix.artifact }}.zip"
       - name: Smoke packaged Windows
         if: runner.os == 'Windows'
