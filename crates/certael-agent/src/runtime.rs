@@ -6,9 +6,10 @@ use certael_agent_platform::{
 };
 use certael_agent_protocol::{
     decode_challenge, report_digest, sign_report, verify_launch_bundle, verify_revocation,
-    AgentHealthV1, AgentHelloV1, AgentIntegrityReportV1, IntegrityObservationV1,
+    AgentHealthV1, AgentHelloV1, AgentIntegrityReportV1, IntegrityObservationV1, ProtocolError,
     SignedAgentRevocationV1, VerificationKeyRing, PROTOCOL_VERSION,
 };
+use certael_agent_updater::{verify_stage_and_install_automatic, UpdateConfig};
 use ed25519_dalek::SigningKey;
 use prost::Message;
 use std::{
@@ -29,6 +30,7 @@ pub struct RuntimeState {
     pub hello: AgentHelloV1,
     pub trust: VerificationKeyRing,
     pub registration: Option<RegistrationBinding>,
+    pub automatic_update: Option<AutomaticUpdateBinding>,
 }
 
 pub struct RegistrationBinding {
@@ -37,6 +39,18 @@ pub struct RegistrationBinding {
     pub game_id: String,
     pub environment_id: String,
     pub status_path: PathBuf,
+}
+
+pub struct AutomaticUpdateBinding {
+    pub trusted_root: PathBuf,
+    pub metadata_url: String,
+    pub targets_url: String,
+    pub state_root: PathBuf,
+    pub install_root: PathBuf,
+    pub channel: String,
+    pub platform: String,
+    pub target_name: String,
+    pub installed_name: String,
 }
 
 pub fn serve(
@@ -72,15 +86,47 @@ pub fn serve(
         bail!("protected game did not provide a signed Agent launch bundle");
     }
     let public_key = state.key.verifying_key().to_bytes();
-    let launch = verify_launch_bundle(
+    let launch = match verify_launch_bundle(
         &bootstrap.payload,
         &state.trust,
         now_unix()?,
         &public_key,
         &state.hello.build_id,
         env!("CARGO_PKG_VERSION"),
-    )
-    .context("signed Agent launch bundle was rejected")?;
+    ) {
+        Ok(launch) => launch,
+        Err(ProtocolError::InvalidField("agent_update_required")) => {
+            publish_runtime(state, "update_required", Some("AGENT_UPDATE_REQUIRED"));
+            if let Some(update) = &state.automatic_update {
+                publish_runtime(state, "updating", Some("AGENT_UPDATE_REQUIRED"));
+                let runtime = tokio::runtime::Runtime::new()
+                    .context("cannot start automatic Agent updater")?;
+                match runtime.block_on(verify_stage_and_install_automatic(
+                    &UpdateConfig {
+                        trusted_root: update.trusted_root.clone(),
+                        metadata_base_url: url::Url::parse(&update.metadata_url)
+                            .context("registered update metadata URL is invalid")?,
+                        targets_base_url: url::Url::parse(&update.targets_url)
+                            .context("registered update target URL is invalid")?,
+                        datastore: update.state_root.join("metadata"),
+                        staging_directory: update.state_root.join("staging"),
+                        target_name: update.target_name.clone(),
+                    },
+                    &update.install_root,
+                    &update.installed_name,
+                    &update.channel,
+                    &update.platform,
+                )) {
+                    Ok(_) => {
+                        publish_runtime(state, "update_ready", Some("RELAUNCH_TO_ACTIVATE_UPDATE"))
+                    }
+                    Err(_) => publish_runtime(state, "update_failed", Some("AGENT_UPDATE_FAILED")),
+                }
+            }
+            bail!("Agent update is required before protected launch");
+        }
+        Err(error) => return Err(error).context("signed Agent launch bundle was rejected"),
+    };
     if state.registration.as_ref().is_some_and(|registration| {
         registration.tenant_id != launch.tenant_id
             || registration.game_id != launch.game_id
@@ -440,6 +486,13 @@ mod tests {
             }],
             not_before_unix: now - 60,
             expires_at_unix: now + 3600,
+            core_sdk_version: "0.3.0-alpha.1".into(),
+            engine_adapter: "native".into(),
+            engine_adapter_version: "0.3.0-alpha.1".into(),
+            core_c_abi_version: 1,
+            action_protocol_version: 1,
+            agent_protocol_version: 1,
+            agent_probe_abi_version: 1,
         };
         let manifest_claim_bytes = manifest_claims.encode_to_vec();
         let manifest = SignedBuildManifestV1 {
@@ -535,6 +588,7 @@ mod tests {
             }])
             .unwrap(),
             registration: None,
+            automatic_update: None,
         };
         let mut output = vec![];
         serve(Cursor::new(input), &mut output, &state).unwrap();

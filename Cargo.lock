@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "certael-agent"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -416,14 +416,14 @@ dependencies = [
 
 [[package]]
 name = "certael-agent-ipc"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "certael-agent-platform"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "anyhow",
  "hex",
@@ -436,7 +436,7 @@ dependencies = [
 
 [[package]]
 name = "certael-agent-probe"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "certael-agent-ipc",
  "sha2",
@@ -444,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "certael-agent-protocol"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "ed25519-dalek",
  "hex",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "certael-agent-session"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "certael-agent-protocol",
  "ed25519-dalek",
@@ -469,7 +469,7 @@ dependencies = [
 
 [[package]]
 name = "certael-agent-updater"
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 dependencies = [
  "hex",
  "serde",

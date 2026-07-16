@@ -26,6 +26,14 @@ launch grant must agree on tenant, game, and environment. A server migration req
 new Agent session and signed grant; an existing binding is never edited. Trust
 roots are never accepted from the game channel.
 
+Pre-1.0 build-manifest v1 now also requires signed Core SDK, engine adapter,
+adapter version, Core C ABI, action protocol, Agent protocol, and probe ABI
+fields. Agent `v0.3.0-alpha.1` is therefore a coordinated breaking alpha update:
+older manifests must be regenerated and older Agents cannot decode the new
+canonical manifest. The `certael.compatibility.v1\0` domain is separate from
+the per-game protocol domains and is verified with a dedicated offline
+compatibility root.
+
 After admission, only fresh `AgentReportChallengeV1`, canonical signed
 revocations, and an empty shutdown frame are accepted from the game. Timed
 health frames report admission, heartbeat, expiry, deadline loss, and

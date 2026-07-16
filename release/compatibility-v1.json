@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "certael-agent",
-  "product_version": "0.2.0",
+  "product_version": "0.3.0-alpha.1",
   "stability": "pre-1.0",
   "agent_protocol_version": 1,
   "local_ipc_version": 1,

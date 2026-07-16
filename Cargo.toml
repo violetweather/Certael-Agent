@@ -4,7 +4,7 @@ members = ["crates/certael-agent-protocol", "crates/certael-agent-platform", "cr
 exclude = ["vendor/wayland-scanner-0.31.10"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/violetweather/Certael-Agent"

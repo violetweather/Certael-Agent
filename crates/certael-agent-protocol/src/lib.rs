@@ -10,6 +10,99 @@ pub const POLICY_DOMAIN: &[u8] = b"certael.agent.policy.v1\0";
 pub const BUILD_MANIFEST_DOMAIN: &[u8] = b"certael.agent.build-manifest.v1\0";
 pub const REGISTRATION_DOMAIN: &[u8] = b"certael.agent.registration.v1\0";
 pub const REVOCATION_DOMAIN: &[u8] = b"certael.agent.revocation.v1\0";
+pub const COMPATIBILITY_DOMAIN: &[u8] = b"certael.compatibility.v1\0";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum CertaelProductV1 {
+    Unspecified = 0,
+    Core = 1,
+    Agent = 2,
+    GodotAdapter = 3,
+    UnityAdapter = 4,
+    UnrealAdapter = 5,
+    DotNetServerSdk = 6,
+    NativeServerSdk = 7,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct CompatibilityProductRuleV1 {
+    #[prost(enumeration = "CertaelProductV1", tag = "1")]
+    pub product: i32,
+    #[prost(string, tag = "2")]
+    pub minimum_supported_version: String,
+    #[prost(string, tag = "3")]
+    pub recommended_version: String,
+    #[prost(uint32, tag = "4")]
+    pub minimum_protocol_version: u32,
+    #[prost(uint32, tag = "5")]
+    pub maximum_protocol_version: u32,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct CompatibilityRevocationV1 {
+    #[prost(enumeration = "CertaelProductV1", tag = "1")]
+    pub product: i32,
+    #[prost(string, tag = "2")]
+    pub version: String,
+    #[prost(int64, tag = "3")]
+    pub effective_at_unix: i64,
+    #[prost(string, tag = "4")]
+    pub reason: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct CompatibilityManifestClaimsV1 {
+    #[prost(uint32, tag = "1")]
+    pub schema_version: u32,
+    #[prost(uint64, tag = "2")]
+    pub revision: u64,
+    #[prost(int64, tag = "3")]
+    pub issued_at_unix: i64,
+    #[prost(int64, tag = "4")]
+    pub expires_at_unix: i64,
+    #[prost(message, repeated, tag = "5")]
+    pub products: Vec<CompatibilityProductRuleV1>,
+    #[prost(message, repeated, tag = "6")]
+    pub revocations: Vec<CompatibilityRevocationV1>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SignedCompatibilityManifestV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub claims: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub key_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompatibilityStateV1 {
+    Supported,
+    Deprecated,
+    UpdateRequired,
+    Revoked,
+    Unknown,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompatibilityDecisionV1 {
+    pub state: CompatibilityStateV1,
+    pub public_reason: &'static str,
+    pub recommended_version: Option<String>,
+    pub manifest_revision: u64,
+}
+
+impl CompatibilityDecisionV1 {
+    pub fn allows_new_protected_session(&self) -> bool {
+        matches!(
+            self.state,
+            CompatibilityStateV1::Supported | CompatibilityStateV1::Deprecated
+        )
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
 #[repr(i32)]
@@ -151,6 +244,20 @@ pub struct BuildManifestClaimsV1 {
     pub not_before_unix: i64,
     #[prost(int64, tag = "9")]
     pub expires_at_unix: i64,
+    #[prost(string, tag = "10")]
+    pub core_sdk_version: String,
+    #[prost(string, tag = "11")]
+    pub engine_adapter: String,
+    #[prost(string, tag = "12")]
+    pub engine_adapter_version: String,
+    #[prost(uint32, tag = "13")]
+    pub core_c_abi_version: u32,
+    #[prost(uint32, tag = "14")]
+    pub action_protocol_version: u32,
+    #[prost(uint32, tag = "15")]
+    pub agent_protocol_version: u32,
+    #[prost(uint32, tag = "16")]
+    pub agent_probe_abi_version: u32,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -465,6 +572,130 @@ pub fn verify_revocation(
     Ok(claims)
 }
 
+pub fn verify_compatibility_manifest(
+    signed: &SignedCompatibilityManifestV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<CompatibilityManifestClaimsV1, ProtocolError> {
+    let claims: CompatibilityManifestClaimsV1 = decode_canonical(&signed.claims)?;
+    validate_compatibility_manifest(&claims, now_unix)?;
+    verify_signed_bytes(
+        COMPATIBILITY_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+pub fn evaluate_compatibility(
+    manifest: Option<&CompatibilityManifestClaimsV1>,
+    product: CertaelProductV1,
+    current_version: &str,
+    protocol_version: u32,
+    now_unix: i64,
+) -> CompatibilityDecisionV1 {
+    let Some(manifest) = manifest
+        .filter(|value| now_unix >= value.issued_at_unix && now_unix < value.expires_at_unix)
+    else {
+        return compatibility_decision(
+            CompatibilityStateV1::Indeterminate,
+            "COMPATIBILITY_INDETERMINATE",
+            None,
+            manifest.map_or(0, |value| value.revision),
+        );
+    };
+    let Ok(current) = semver::Version::parse(current_version) else {
+        return compatibility_decision(
+            CompatibilityStateV1::Unknown,
+            "VERSION_UNKNOWN",
+            None,
+            manifest.revision,
+        );
+    };
+    let product_value = product as i32;
+    let rule = manifest
+        .products
+        .iter()
+        .find(|rule| rule.product == product_value);
+    if manifest.revocations.iter().any(|revocation| {
+        revocation.product == product_value
+            && revocation.version == current_version
+            && now_unix >= revocation.effective_at_unix
+    }) {
+        return compatibility_decision(
+            CompatibilityStateV1::Revoked,
+            "VERSION_REVOKED",
+            rule.map(|value| value.recommended_version.clone()),
+            manifest.revision,
+        );
+    }
+    let Some(rule) = rule else {
+        return compatibility_decision(
+            CompatibilityStateV1::Unknown,
+            "PRODUCT_UNKNOWN",
+            None,
+            manifest.revision,
+        );
+    };
+    if protocol_version < rule.minimum_protocol_version {
+        return compatibility_decision(
+            CompatibilityStateV1::UpdateRequired,
+            "PROTOCOL_UPDATE_REQUIRED",
+            Some(rule.recommended_version.clone()),
+            manifest.revision,
+        );
+    }
+    if protocol_version > rule.maximum_protocol_version {
+        return compatibility_decision(
+            CompatibilityStateV1::Unknown,
+            "PROTOCOL_TOO_NEW",
+            Some(rule.recommended_version.clone()),
+            manifest.revision,
+        );
+    }
+    let minimum = semver::Version::parse(&rule.minimum_supported_version)
+        .expect("validated compatibility minimum");
+    let recommended = semver::Version::parse(&rule.recommended_version)
+        .expect("validated compatibility recommendation");
+    if current < minimum {
+        compatibility_decision(
+            CompatibilityStateV1::UpdateRequired,
+            "VERSION_UPDATE_REQUIRED",
+            Some(rule.recommended_version.clone()),
+            manifest.revision,
+        )
+    } else if current < recommended {
+        compatibility_decision(
+            CompatibilityStateV1::Deprecated,
+            "VERSION_DEPRECATED",
+            Some(rule.recommended_version.clone()),
+            manifest.revision,
+        )
+    } else {
+        compatibility_decision(
+            CompatibilityStateV1::Supported,
+            "SUPPORTED",
+            Some(rule.recommended_version.clone()),
+            manifest.revision,
+        )
+    }
+}
+
+fn compatibility_decision(
+    state: CompatibilityStateV1,
+    public_reason: &'static str,
+    recommended_version: Option<String>,
+    manifest_revision: u64,
+) -> CompatibilityDecisionV1 {
+    CompatibilityDecisionV1 {
+        state,
+        public_reason,
+        recommended_version,
+        manifest_revision,
+    }
+}
+
 pub fn verify_launch_bundle(
     input: &[u8],
     keys: &VerificationKeyRing,
@@ -627,6 +858,13 @@ fn validate_build_manifest(
         || claims.not_before_unix > now_unix + 30
         || claims.expires_at_unix <= now_unix
         || claims.expires_at_unix <= claims.not_before_unix
+        || !version_identifier(&claims.core_sdk_version)
+        || !identifier(&claims.engine_adapter)
+        || !version_identifier(&claims.engine_adapter_version)
+        || claims.core_c_abi_version != 1
+        || claims.action_protocol_version != 1
+        || claims.agent_protocol_version != PROTOCOL_VERSION
+        || claims.agent_probe_abi_version != 1
     {
         return Err(ProtocolError::InvalidField("build_manifest"));
     }
@@ -637,6 +875,56 @@ fn validate_build_manifest(
             || !paths.insert(file.path.to_ascii_lowercase())
     }) {
         return Err(ProtocolError::InvalidField("build_manifest_file"));
+    }
+    Ok(())
+}
+
+fn validate_compatibility_manifest(
+    claims: &CompatibilityManifestClaimsV1,
+    now_unix: i64,
+) -> Result<(), ProtocolError> {
+    if claims.schema_version != 1
+        || claims.revision == 0
+        || claims.products.is_empty()
+        || claims.products.len() > 64
+        || claims.revocations.len() > 4_096
+        || claims.issued_at_unix > now_unix + 300
+        || claims.expires_at_unix <= now_unix
+        || claims.expires_at_unix <= claims.issued_at_unix
+        || claims.expires_at_unix - claims.issued_at_unix > 32 * 24 * 60 * 60
+    {
+        return Err(ProtocolError::InvalidField("compatibility_manifest"));
+    }
+    let mut products = std::collections::BTreeSet::new();
+    for rule in &claims.products {
+        let Ok(product) = CertaelProductV1::try_from(rule.product) else {
+            return Err(ProtocolError::InvalidField("compatibility_product"));
+        };
+        if product == CertaelProductV1::Unspecified {
+            return Err(ProtocolError::InvalidField("compatibility_product"));
+        }
+        let minimum = semver::Version::parse(&rule.minimum_supported_version)
+            .map_err(|_| ProtocolError::InvalidField("compatibility_version"))?;
+        let recommended = semver::Version::parse(&rule.recommended_version)
+            .map_err(|_| ProtocolError::InvalidField("compatibility_version"))?;
+        if !products.insert(product as i32)
+            || recommended < minimum
+            || rule.minimum_protocol_version == 0
+            || rule.maximum_protocol_version < rule.minimum_protocol_version
+        {
+            return Err(ProtocolError::InvalidField("compatibility_product"));
+        }
+    }
+    for revocation in &claims.revocations {
+        if !matches!(CertaelProductV1::try_from(revocation.product),
+            Ok(product) if product != CertaelProductV1::Unspecified)
+            || semver::Version::parse(&revocation.version).is_err()
+            || !identifier(&revocation.reason)
+            || revocation.effective_at_unix < claims.issued_at_unix - 86_400
+            || revocation.effective_at_unix > claims.expires_at_unix
+        {
+            return Err(ProtocolError::InvalidField("compatibility_revocation"));
+        }
     }
     Ok(())
 }
@@ -944,6 +1232,13 @@ mod tests {
             }],
             not_before_unix: 1_699_999_000,
             expires_at_unix: 1_700_003_600,
+            core_sdk_version: "0.3.0-alpha.1".into(),
+            engine_adapter: "native".into(),
+            engine_adapter_version: "0.3.0-alpha.1".into(),
+            core_c_abi_version: 1,
+            action_protocol_version: 1,
+            agent_protocol_version: 1,
+            agent_probe_abi_version: 1,
         };
         let manifest_claim_bytes = manifest_claims.encode_to_vec();
         let manifest = SignedBuildManifestV1 {
@@ -1146,5 +1441,54 @@ mod tests {
         };
         let encoded = claims.encode_to_vec();
         assert_eq!(hex::encode(&encoded), "080112056772616e741a0674656e616e74220467616d652a0470726f643206706c617965723a056d6174636842056275696c644a20ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c5080e2cfaa0658bce2cfaa066220947cc7a0c10233b2ff5c0aae415b2e37cfc97915e5747edcc3eb8245f600f4406a0673657276657272200505050505050505050505050505050505050505050505050505050505050505");
+    }
+
+    #[test]
+    fn compatibility_manifest_verifies_and_evaluates_lifecycle_states() {
+        let key = SigningKey::from_bytes(&[9; 32]);
+        let claims = CompatibilityManifestClaimsV1 {
+            schema_version: 1,
+            revision: 7,
+            issued_at_unix: 1_700_000_000,
+            expires_at_unix: 1_700_086_400,
+            products: vec![CompatibilityProductRuleV1 {
+                product: CertaelProductV1::Agent as i32,
+                minimum_supported_version: "0.2.0".into(),
+                recommended_version: "0.3.0-alpha.1".into(),
+                minimum_protocol_version: 1,
+                maximum_protocol_version: 1,
+            }],
+            revocations: vec![CompatibilityRevocationV1 {
+                product: CertaelProductV1::Agent as i32,
+                version: "0.2.1".into(),
+                effective_at_unix: 1_700_000_000,
+                reason: "security-withdrawal".into(),
+            }],
+        };
+        let claim_bytes = claims.encode_to_vec();
+        let signed = SignedCompatibilityManifestV1 {
+            claims: claim_bytes.clone(),
+            signature: key
+                .sign(&[COMPATIBILITY_DOMAIN, &claim_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            key_id: "root-1".into(),
+        };
+        let verified =
+            verify_compatibility_manifest(&signed, &key_ring(&key), 1_700_000_001).unwrap();
+        let decide = |version| {
+            evaluate_compatibility(
+                Some(&verified),
+                CertaelProductV1::Agent,
+                version,
+                1,
+                1_700_000_001,
+            )
+            .state
+        };
+        assert_eq!(decide("0.1.0"), CompatibilityStateV1::UpdateRequired);
+        assert_eq!(decide("0.2.0"), CompatibilityStateV1::Deprecated);
+        assert_eq!(decide("0.2.1"), CompatibilityStateV1::Revoked);
+        assert_eq!(decide("0.3.0-alpha.1"), CompatibilityStateV1::Supported);
     }
 }

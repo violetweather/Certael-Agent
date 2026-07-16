@@ -21,6 +21,8 @@ sudo ./install/install.sh
 See [the complete installation guide](docs/INSTALLING.md), including installed
 paths, launch commands, upgrades, and uninstall behavior. Verified staged
 updates and rollback are documented in [the secure update guide](docs/UPDATES.md).
+Required-update states and cross-product support decisions are documented in
+[the compatibility guide](docs/COMPATIBILITY.md).
 
 ## Build from source
 
@@ -62,6 +64,11 @@ all three in `AgentLaunchBundleV1`, relays fresh server challenges, forwards
 signed reports, and can relay a signed revocation. Missing trust roots, altered
 files, wrong builds, expired state, missed deadlines, changed process identity,
 and malformed frames fail closed.
+
+When Core's signed policy requires a newer Agent, a registered launch publishes
+an `update_required` state, verifies and stages the matching TUF target, and
+surfaces relaunch, repair, or rollback actions in the GUI. The game is not left
+running after a failed protected admission.
 
 ## Privacy boundary
 

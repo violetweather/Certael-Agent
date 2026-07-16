@@ -1,12 +1,16 @@
 use anyhow::{bail, Context, Result};
 use certael_agent_platform::{inspect_executable, validate_game_path};
-use certael_agent_protocol::{AgentHelloV1, PROTOCOL_VERSION};
+use certael_agent_protocol::{
+    evaluate_compatibility, verify_compatibility_manifest, AgentHelloV1, CertaelProductV1,
+    SignedCompatibilityManifestV1, PROTOCOL_VERSION,
+};
 use certael_agent_updater::{
     activate_pending, read_activation_state, recover, register_existing_version, rollback,
     verify_stage_and_install, verify_stage_and_install_automatic, InstallConfig, UpdateConfig,
 };
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
+use prost::Message;
 use rand_core::OsRng;
 use std::path::PathBuf;
 #[cfg(unix)]
@@ -41,6 +45,18 @@ enum Commands {
     ValidateTrustStore {
         #[arg(long)]
         trust_store: PathBuf,
+    },
+    CompatibilityCheck {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        trust_store: PathBuf,
+        #[arg(long)]
+        product: String,
+        #[arg(long)]
+        version: String,
+        #[arg(long)]
+        protocol: u32,
     },
     Launch {
         #[arg(long)]
@@ -155,6 +171,35 @@ fn main() -> Result<()> {
         Some(Commands::ValidateTrustStore { trust_store }) => {
             trust::load(&trust_store)?;
             println!("Agent trust store is valid");
+        }
+        Some(Commands::CompatibilityCheck {
+            manifest,
+            trust_store,
+            product,
+            version,
+            protocol,
+        }) => {
+            let bytes = std::fs::read(manifest)?;
+            let signed = SignedCompatibilityManifestV1::decode(bytes.as_slice())
+                .context("signed compatibility manifest is malformed")?;
+            if signed.encode_to_vec() != bytes {
+                bail!("signed compatibility manifest is not canonical");
+            }
+            let claims =
+                verify_compatibility_manifest(&signed, &trust::load(&trust_store)?, now_unix()?)?;
+            let product = parse_product(&product)?;
+            let decision =
+                evaluate_compatibility(Some(&claims), product, &version, protocol, now_unix()?);
+            println!(
+                "state={:?} reason={} recommended={} revision={}",
+                decision.state,
+                decision.public_reason,
+                decision.recommended_version.as_deref().unwrap_or("none"),
+                decision.manifest_revision
+            );
+            if !decision.allows_new_protected_session() {
+                bail!("this Certael component cannot start a new protected session");
+            }
         }
         Some(Commands::Launch {
             game,
@@ -348,11 +393,37 @@ fn default_install_root() -> PathBuf {
     PathBuf::from("/usr/local/lib/certael-agent")
 }
 
+fn parse_product(value: &str) -> Result<CertaelProductV1> {
+    match value.to_ascii_lowercase().as_str() {
+        "core" => Ok(CertaelProductV1::Core),
+        "agent" => Ok(CertaelProductV1::Agent),
+        "godot" | "godot-adapter" => Ok(CertaelProductV1::GodotAdapter),
+        "unity" | "unity-adapter" => Ok(CertaelProductV1::UnityAdapter),
+        "unreal" | "unreal-adapter" => Ok(CertaelProductV1::UnrealAdapter),
+        "dotnet-server-sdk" => Ok(CertaelProductV1::DotNetServerSdk),
+        "native-server-sdk" => Ok(CertaelProductV1::NativeServerSdk),
+        _ => bail!("unknown Certael product"),
+    }
+}
+
+fn now_unix() -> Result<i64> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_secs()
+        .try_into()?)
+}
+
 fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> {
     launch_with_registration(game, trust_store, args, None)
 }
 
 fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) -> Result<()> {
+    let update_state = registered
+        .status_path
+        .parent()
+        .context("registered game has no user update-state directory")?
+        .join("updates")
+        .join(&registered.claims.registration_id);
     let binding = runtime::RegistrationBinding {
         registration_id: registered.claims.registration_id.clone(),
         tenant_id: registered.claims.tenant_id,
@@ -360,12 +431,28 @@ fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) ->
         environment_id: registered.claims.environment_id,
         status_path: registered.status_path,
     };
+    let update = runtime::AutomaticUpdateBinding {
+        trusted_root: registered.update_root,
+        metadata_url: registered.claims.update_metadata_url.clone(),
+        targets_url: registered.claims.update_targets_url.clone(),
+        state_root: update_state,
+        install_root: default_install_root(),
+        channel: registered.claims.update_channel.clone(),
+        platform: target_platform().to_owned(),
+        target_name: format!(
+            "certael-agent/{}/{}",
+            registered.claims.update_channel,
+            target_platform()
+        ),
+        installed_name: platform_agent_name().to_owned(),
+    };
     launch_with_root(
         registered.game,
         registered.game_root,
         registered.trust_store,
         args,
         Some(binding),
+        Some(update),
     )
 }
 
@@ -380,7 +467,7 @@ fn launch_with_registration(
         .parent()
         .context("game has no installation root")?
         .to_path_buf();
-    launch_with_root(game, game_root, trust_store, args, registration)
+    launch_with_root(game, game_root, trust_store, args, registration, None)
 }
 
 fn launch_with_root(
@@ -389,6 +476,7 @@ fn launch_with_root(
     trust_store: PathBuf,
     args: Vec<String>,
     registration: Option<runtime::RegistrationBinding>,
+    automatic_update: Option<runtime::AutomaticUpdateBinding>,
 ) -> Result<()> {
     let snapshot = inspect_executable(&game)?;
     let key = SigningKey::generate(&mut OsRng);
@@ -408,6 +496,7 @@ fn launch_with_root(
         key,
         hello,
         registration,
+        automatic_update,
     };
 
     #[cfg(unix)]
@@ -457,7 +546,11 @@ fn launch_unix(game: PathBuf, args: Vec<String>, mut state: runtime::RuntimeStat
     let mut writer = channel
         .try_clone()
         .context("failed to clone private Agent channel")?;
-    runtime::serve(channel, &mut writer, &state)?;
+    if let Err(error) = runtime::serve(channel, &mut writer, &state) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
     drop(writer);
     let status = child.wait()?;
     if !status.success() {
