@@ -1,6 +1,6 @@
 param(
     [string]$Prefix = "$env:ProgramFiles\Certael",
-    [string]$Version = "0.3.0-alpha.3",
+    [string]$Version = "0.4.0-alpha.1",
     [string]$Registration,
     [string]$PublisherTrustStore,
     [string]$UpdateRoot,

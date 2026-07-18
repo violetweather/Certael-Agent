@@ -22,7 +22,9 @@ See [the complete installation guide](docs/INSTALLING.md), including installed
 paths, launch commands, upgrades, and uninstall behavior. Verified staged
 updates and rollback are documented in [the secure update guide](docs/UPDATES.md).
 Required-update states and cross-product support decisions are documented in
-[the compatibility guide](docs/COMPATIBILITY.md).
+[the compatibility guide](docs/COMPATIBILITY.md). Publisher branding,
+registered-file verification, and launch recovery actions are documented in
+[the launch splash guide](docs/LAUNCH-SPLASH.md).
 
 ## Build from source
 

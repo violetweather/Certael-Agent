@@ -1,21 +1,25 @@
 use anyhow::{bail, Context, Result};
-use certael_agent_platform::{inspect_executable, validate_game_path};
+use certael_agent_platform::{
+    inspect_executable, validate_game_path, verify_build_manifest, ProtectedBuildFile,
+    ProtectedBuildManifest,
+};
 use certael_agent_protocol::{
     evaluate_compatibility, verify_compatibility_manifest, AgentHelloV1, CertaelProductV1,
     SignedCompatibilityManifestV1, PROTOCOL_VERSION,
 };
 use certael_agent_updater::{
-    activate_pending, read_activation_state, recover, register_existing_version, rollback,
-    verify_stage_and_install, verify_stage_and_install_automatic, InstallConfig, UpdateConfig,
+    activate_pending, active_target, read_activation_state, recover, register_existing_version,
+    rollback, verify_stage_and_install, verify_stage_and_install_automatic, InstallConfig,
+    UpdateConfig,
 };
 use clap::{Parser, Subcommand};
 use ed25519_dalek::SigningKey;
 use prost::Message;
 use rand_core::OsRng;
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::process::{Command, Stdio};
 
+mod branding;
 mod hardening;
 mod registry;
 mod runtime;
@@ -79,6 +83,10 @@ enum Commands {
         game_root: PathBuf,
         #[arg(long)]
         registry_root: Option<PathBuf>,
+        #[arg(long, requires = "branding_root")]
+        branding_manifest: Option<PathBuf>,
+        #[arg(long, requires = "branding_manifest")]
+        branding_root: Option<PathBuf>,
     },
     UpdateGameRegistration {
         #[arg(long)]
@@ -91,6 +99,10 @@ enum Commands {
         game_root: PathBuf,
         #[arg(long)]
         registry_root: Option<PathBuf>,
+        #[arg(long, requires = "branding_root")]
+        branding_manifest: Option<PathBuf>,
+        #[arg(long, requires = "branding_manifest")]
+        branding_root: Option<PathBuf>,
     },
     ListGames {
         #[arg(long)]
@@ -103,6 +115,49 @@ enum Commands {
         registry_root: Option<PathBuf>,
         #[arg(last = true)]
         args: Vec<String>,
+    },
+    #[command(hide = true)]
+    LaunchSplash {
+        #[arg(long)]
+        registration_id: String,
+        #[arg(long)]
+        launch_attempt_id: String,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    #[command(hide = true)]
+    RepairGame {
+        #[arg(long)]
+        registration_id: String,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    #[command(hide = true)]
+    LaunchOfflineGame {
+        #[arg(long)]
+        registration_id: String,
+        #[arg(long)]
+        registry_root: Option<PathBuf>,
+    },
+    #[cfg(debug_assertions)]
+    #[command(hide = true)]
+    PreviewLaunchSplash {
+        #[arg(long)]
+        hero: PathBuf,
+        #[arg(long)]
+        icon: PathBuf,
+        #[arg(long, default_value = "awaiting_server_admission")]
+        state: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        screenshot: PathBuf,
+        #[arg(long, default_value_t = 1040.0)]
+        width: f32,
+        #[arg(long, default_value_t = 800.0)]
+        height: f32,
+        #[arg(long, default_value_t = 1.0)]
+        zoom: f32,
     },
     UpdateRegisteredGame {
         #[arg(long)]
@@ -214,6 +269,8 @@ fn main() -> Result<()> {
             update_root,
             game_root,
             registry_root,
+            branding_manifest,
+            branding_root,
         }) => {
             let claims = registry::register(
                 &registry_root.unwrap_or_else(registry::default_root),
@@ -221,6 +278,8 @@ fn main() -> Result<()> {
                 &publisher_trust_store,
                 &update_root,
                 &game_root,
+                branding_manifest.as_deref(),
+                branding_root.as_deref(),
             )?;
             println!("registered {} ({})", claims.game_id, claims.registration_id);
         }
@@ -230,6 +289,8 @@ fn main() -> Result<()> {
             update_root,
             game_root,
             registry_root,
+            branding_manifest,
+            branding_root,
         }) => {
             let claims = registry::update(
                 &registry_root.unwrap_or_else(registry::default_root),
@@ -237,6 +298,8 @@ fn main() -> Result<()> {
                 &publisher_trust_store,
                 &update_root,
                 &game_root,
+                branding_manifest.as_deref(),
+                branding_root.as_deref(),
             )?;
             println!("updated {} ({})", claims.game_id, claims.registration_id);
         }
@@ -250,12 +313,63 @@ fn main() -> Result<()> {
             registry_root,
             args,
         }) => {
+            let registry_root = registry_root.unwrap_or_else(registry::default_root);
+            let registered = registry::load(&registry_root, &registration_id)?;
+            let launch_attempt_id = uuid::Uuid::new_v4().to_string();
+            spawn_launch_splash(&registration_id, &launch_attempt_id, &registry_root)?;
+            launch_registered(registered, args, launch_attempt_id)?;
+        }
+        Some(Commands::LaunchSplash {
+            registration_id,
+            launch_attempt_id,
+            registry_root,
+        }) => {
             let registered = registry::load(
                 &registry_root.unwrap_or_else(registry::default_root),
                 &registration_id,
             )?;
-            launch_registered(registered, args)?;
+            ui::run_splash(registered, launch_attempt_id)?;
         }
+        Some(Commands::RepairGame {
+            registration_id,
+            registry_root,
+        }) => {
+            let registered = registry::load(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration_id,
+            )?;
+            run_registered_repair(&registered)?;
+        }
+        Some(Commands::LaunchOfflineGame {
+            registration_id,
+            registry_root,
+        }) => {
+            let registered = registry::load(
+                &registry_root.unwrap_or_else(registry::default_root),
+                &registration_id,
+            )?;
+            launch_registered_offline(&registered)?;
+        }
+        #[cfg(debug_assertions)]
+        Some(Commands::PreviewLaunchSplash {
+            hero,
+            icon,
+            state,
+            reason,
+            screenshot,
+            width,
+            height,
+            zoom,
+        }) => preview_launch_splash(SplashPreviewArgs {
+            hero,
+            icon,
+            state,
+            reason,
+            screenshot,
+            width,
+            height,
+            zoom,
+        })?,
         Some(Commands::UpdateRegisteredGame {
             registration_id,
             registry_root,
@@ -415,11 +529,218 @@ fn now_unix() -> Result<i64> {
         .try_into()?)
 }
 
+#[cfg(debug_assertions)]
+struct SplashPreviewArgs {
+    hero: PathBuf,
+    icon: PathBuf,
+    state: String,
+    reason: Option<String>,
+    screenshot: PathBuf,
+    width: f32,
+    height: f32,
+    zoom: f32,
+}
+
+#[cfg(debug_assertions)]
+fn preview_launch_splash(args: SplashPreviewArgs) -> Result<()> {
+    let SplashPreviewArgs {
+        hero,
+        icon,
+        state,
+        reason,
+        screenshot,
+        width,
+        height,
+        zoom,
+    } = args;
+    if !(720.0..=3840.0).contains(&width)
+        || !(560.0..=2160.0).contains(&height)
+        || !(1.0..=2.0).contains(&zoom)
+    {
+        bail!("preview viewport or zoom is outside the supported QA range");
+    }
+    branding::decode_icon_rgba(&icon)?;
+    branding::decode_hero_rgba(&hero)?;
+    let preview_root =
+        std::env::temp_dir().join(format!("certael-splash-preview-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&preview_root)?;
+    let status_path = preview_root.join("preview-status.json");
+    status::publish(
+        &status_path,
+        &status::RuntimeStatus {
+            format_version: 2,
+            registration_id: "preview-production".into(),
+            game_id: "hollowstar".into(),
+            state,
+            public_reason: reason,
+            updated_at_unix: now_unix()?,
+            launch_attempt_id: Some("preview-attempt".into()),
+            milestone_index: Some(6),
+            milestone_total: Some(8),
+        },
+    )?;
+    let executable = std::env::current_exe()?;
+    let game_root = executable
+        .parent()
+        .context("preview executable has no parent")?
+        .to_path_buf();
+    let result = ui::run_splash_preview(
+        registry::RegisteredGame {
+            claims: certael_agent_protocol::GameRegistrationClaimsV1 {
+                protocol_version: PROTOCOL_VERSION,
+                registration_id: "preview-production".into(),
+                publisher_id: "northline-games".into(),
+                tenant_id: "preview".into(),
+                game_id: "hollowstar".into(),
+                environment_id: "preview".into(),
+                executable_relative_path: "preview-game".into(),
+                trust_store_sha256: vec![0; 32],
+                update_root_sha256: vec![0; 32],
+                update_metadata_url: "https://updates.example/metadata/".into(),
+                update_targets_url: "https://updates.example/targets/".into(),
+                update_channel: "stable".into(),
+                not_before_unix: 1,
+                expires_at_unix: i64::MAX,
+                registered_files: vec![],
+                repair_executable_relative_path: "repair.exe".into(),
+                repair_arguments: vec![],
+                offline_play_allowed: true,
+                offline_arguments: vec![],
+            },
+            game: executable.clone(),
+            game_root,
+            trust_store: executable.clone(),
+            update_root: executable,
+            state_root: preview_root.clone(),
+            status_path,
+            branding: Some(branding::VerifiedBranding {
+                claims: certael_agent_protocol::BrandingManifestClaimsV1 {
+                    protocol_version: PROTOCOL_VERSION,
+                    registration_id: "preview-production".into(),
+                    game_id: "hollowstar".into(),
+                    display_name: "Hollowstar".into(),
+                    publisher_name: "Northline Games".into(),
+                    icon_relative_path: "icon.png".into(),
+                    icon_sha256: vec![0; 32],
+                    not_before_unix: 1,
+                    expires_at_unix: i64::MAX,
+                    hero_relative_path: "hero.png".into(),
+                    hero_sha256: vec![0; 32],
+                },
+                icon: branding::VerifiedBrandingImage { path: icon },
+                hero: Some(branding::VerifiedBrandingImage { path: hero }),
+            }),
+        },
+        "preview-attempt".into(),
+        screenshot,
+        [width, height],
+        zoom,
+    );
+    let _ = std::fs::remove_dir_all(preview_root);
+    result
+}
+
 fn launch(game: PathBuf, trust_store: PathBuf, args: Vec<String>) -> Result<()> {
     launch_with_registration(game, trust_store, args, None)
 }
 
-fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) -> Result<()> {
+fn spawn_launch_splash(
+    registration_id: &str,
+    launch_attempt_id: &str,
+    registry_root: &std::path::Path,
+) -> Result<()> {
+    let executable =
+        std::env::current_exe().context("cannot locate the Certael Agent launch window")?;
+    Command::new(executable)
+        .arg("launch-splash")
+        .arg("--registration-id")
+        .arg(registration_id)
+        .arg("--launch-attempt-id")
+        .arg(launch_attempt_id)
+        .arg("--registry-root")
+        .arg(registry_root)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("failed to start the Certael Agent launch window")?;
+    Ok(())
+}
+
+fn run_registered_repair(registered: &registry::RegisteredGame) -> Result<()> {
+    if registered.claims.repair_executable_relative_path.is_empty() {
+        bail!("this game did not register a repair action");
+    }
+    let repair = registered
+        .game_root
+        .join(&registered.claims.repair_executable_relative_path);
+    verify_registered_file(
+        registered,
+        &registered.claims.repair_executable_relative_path,
+    )?;
+    Command::new(repair)
+        .args(&registered.claims.repair_arguments)
+        .stdin(Stdio::null())
+        .spawn()
+        .context("failed to start the registered game repair action")?;
+    Ok(())
+}
+
+fn launch_registered_offline(registered: &registry::RegisteredGame) -> Result<()> {
+    if !registered.claims.offline_play_allowed {
+        bail!("this game does not allow offline launch from Certael Agent");
+    }
+    if registered.claims.registered_files.iter().any(|file| {
+        file.relative_path
+            .eq_ignore_ascii_case(&registered.claims.executable_relative_path)
+    }) {
+        verify_registered_file(registered, &registered.claims.executable_relative_path)?;
+    } else {
+        inspect_executable(&registered.game)
+            .context("offline game executable could not be verified")?;
+    }
+    Command::new(&registered.game)
+        .args(&registered.claims.offline_arguments)
+        .env_remove("CERTAEL_AGENT_FD")
+        .env_remove("CERTAEL_AGENT_READ_HANDLE")
+        .env_remove("CERTAEL_AGENT_WRITE_HANDLE")
+        .stdin(Stdio::null())
+        .spawn()
+        .context("failed to launch the registered offline game")?;
+    Ok(())
+}
+
+fn verify_registered_file(
+    registered: &registry::RegisteredGame,
+    relative_path: &str,
+) -> Result<()> {
+    let file = registered
+        .claims
+        .registered_files
+        .iter()
+        .find(|file| file.relative_path.eq_ignore_ascii_case(relative_path))
+        .context("registered recovery executable has no signed file binding")?;
+    let manifest = ProtectedBuildManifest {
+        build_id: format!("registration:{}", registered.claims.registration_id),
+        files: vec![ProtectedBuildFile {
+            path: file.relative_path.clone(),
+            size: file.size,
+            sha256: hex::encode(&file.sha256),
+        }],
+    };
+    let mismatches = verify_build_manifest(&registered.game_root, &manifest)
+        .context("registered recovery executable could not be verified")?;
+    if !mismatches.is_empty() {
+        bail!("registered recovery executable does not match its signed digest");
+    }
+    Ok(())
+}
+
+fn launch_registered(
+    registered: registry::RegisteredGame,
+    args: Vec<String>,
+    launch_attempt_id: String,
+) -> Result<()> {
     let update_state = registered
         .status_path
         .parent()
@@ -432,7 +753,52 @@ fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) ->
         game_id: registered.claims.game_id,
         environment_id: registered.claims.environment_id,
         status_path: registered.status_path,
+        launch_attempt_id,
     };
+    runtime::publish_binding(&binding, "verifying_agent_version", None);
+    if let Err(error) = verify_selected_agent() {
+        runtime::publish_binding(&binding, "launch_failed", Some("AGENT_VERSION_UNVERIFIED"));
+        return Err(error);
+    }
+    runtime::publish_binding(&binding, "loading_signed_registration", None);
+    runtime::publish_binding(&binding, "hashing_registered_game_files", None);
+    if !registered.claims.registered_files.is_empty() {
+        let manifest = ProtectedBuildManifest {
+            build_id: format!("registration:{}", registered.claims.registration_id),
+            files: registered
+                .claims
+                .registered_files
+                .iter()
+                .map(|file| ProtectedBuildFile {
+                    path: file.relative_path.clone(),
+                    size: file.size,
+                    sha256: hex::encode(&file.sha256),
+                })
+                .collect(),
+        };
+        let mismatches = match verify_build_manifest(&registered.game_root, &manifest) {
+            Ok(value) => value,
+            Err(error) => {
+                runtime::publish_binding(
+                    &binding,
+                    "launch_failed",
+                    Some("REGISTERED_GAME_FILES_UNREADABLE"),
+                );
+                return Err(error).context("registered game files could not be hashed");
+            }
+        };
+        if !mismatches.is_empty() {
+            runtime::publish_binding(
+                &binding,
+                "launch_failed",
+                Some("REGISTERED_GAME_FILES_MISMATCH"),
+            );
+            bail!("registered game files do not match their signed registration");
+        }
+    } else {
+        inspect_executable(&registered.game)
+            .context("registered game executable could not be hashed")?;
+    }
     let update = runtime::AutomaticUpdateBinding {
         trusted_root: registered.update_root,
         metadata_url: registered.claims.update_metadata_url.clone(),
@@ -448,14 +814,35 @@ fn launch_registered(registered: registry::RegisteredGame, args: Vec<String>) ->
         ),
         installed_name: platform_agent_name().to_owned(),
     };
-    launch_with_root(
+    let failure_binding = binding.clone();
+    let result = launch_with_root(
         registered.game,
         registered.game_root,
         registered.trust_store,
         args,
         Some(binding),
         Some(update),
-    )
+    );
+    if result.is_err() {
+        let already_published = crate::status::read(&failure_binding.status_path)
+            .ok()
+            .is_some_and(|status| {
+                status.launch_attempt_id.as_deref()
+                    == Some(failure_binding.launch_attempt_id.as_str())
+                    && matches!(
+                        status.state.as_str(),
+                        "launch_failed" | "update_failed" | "update_ready"
+                    )
+            });
+        if !already_published {
+            runtime::publish_binding(
+                &failure_binding,
+                "launch_failed",
+                Some("PROTECTED_LAUNCH_FAILED"),
+            );
+        }
+    }
+    result
 }
 
 fn launch_with_registration(
@@ -500,6 +887,7 @@ fn launch_with_root(
         registration,
         automatic_update,
     };
+    runtime::publish_runtime(&state, "starting_game", None);
 
     #[cfg(unix)]
     return launch_unix(game, args, state);
@@ -507,6 +895,38 @@ fn launch_with_root(
     {
         windows_launch::launch(game, args, state)
     }
+}
+
+fn verify_selected_agent() -> Result<()> {
+    let selected_agent = std::env::current_exe()
+        .context("cannot locate selected Certael Agent version")?
+        .canonicalize()
+        .context("cannot resolve selected Certael Agent version")?;
+    if !selected_agent.is_file() {
+        bail!("selected Certael Agent version is unavailable");
+    }
+    let launcher_verified = std::env::var("CERTAEL_AGENT_LAUNCHER_VERIFIED").as_deref() == Ok("1")
+        && std::env::var("CERTAEL_AGENT_SELECTED_VERSION").as_deref()
+            == Ok(env!("CARGO_PKG_VERSION"))
+        && std::env::var_os("CERTAEL_AGENT_SELECTED_TARGET")
+            .and_then(|path| PathBuf::from(path).canonicalize().ok())
+            .as_ref()
+            == Some(&selected_agent);
+    if launcher_verified {
+        return Ok(());
+    }
+    if active_target(&default_install_root())
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .as_ref()
+        == Some(&selected_agent)
+    {
+        return Ok(());
+    }
+    #[cfg(debug_assertions)]
+    return Ok(());
+    #[cfg(not(debug_assertions))]
+    bail!("selected Certael Agent was not verified by the stable launcher");
 }
 
 #[cfg(unix)]

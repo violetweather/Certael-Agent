@@ -9,6 +9,7 @@ pub const LAUNCH_DOMAIN: &[u8] = b"certael.agent.launch.v1\0";
 pub const POLICY_DOMAIN: &[u8] = b"certael.agent.policy.v1\0";
 pub const BUILD_MANIFEST_DOMAIN: &[u8] = b"certael.agent.build-manifest.v1\0";
 pub const REGISTRATION_DOMAIN: &[u8] = b"certael.agent.registration.v1\0";
+pub const BRANDING_DOMAIN: &[u8] = b"certael.agent.branding.v1\0";
 pub const REVOCATION_DOMAIN: &[u8] = b"certael.agent.revocation.v1\0";
 pub const COMPATIBILITY_DOMAIN: &[u8] = b"certael.compatibility.v1\0";
 
@@ -300,10 +301,66 @@ pub struct GameRegistrationClaimsV1 {
     pub not_before_unix: i64,
     #[prost(int64, tag = "14")]
     pub expires_at_unix: i64,
+    #[prost(message, repeated, tag = "15")]
+    pub registered_files: Vec<RegisteredGameFileV1>,
+    #[prost(string, tag = "16")]
+    pub repair_executable_relative_path: String,
+    #[prost(string, repeated, tag = "17")]
+    pub repair_arguments: Vec<String>,
+    #[prost(bool, tag = "18")]
+    pub offline_play_allowed: bool,
+    #[prost(string, repeated, tag = "19")]
+    pub offline_arguments: Vec<String>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct RegisteredGameFileV1 {
+    #[prost(string, tag = "1")]
+    pub relative_path: String,
+    #[prost(uint64, tag = "2")]
+    pub size: u64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub sha256: Vec<u8>,
 }
 
 #[derive(Clone, PartialEq, Message)]
 pub struct SignedGameRegistrationV1 {
+    #[prost(bytes = "vec", tag = "1")]
+    pub claims: Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub signature: Vec<u8>,
+    #[prost(string, tag = "3")]
+    pub key_id: String,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct BrandingManifestClaimsV1 {
+    #[prost(uint32, tag = "1")]
+    pub protocol_version: u32,
+    #[prost(string, tag = "2")]
+    pub registration_id: String,
+    #[prost(string, tag = "3")]
+    pub game_id: String,
+    #[prost(string, tag = "4")]
+    pub display_name: String,
+    #[prost(string, tag = "5")]
+    pub publisher_name: String,
+    #[prost(string, tag = "6")]
+    pub icon_relative_path: String,
+    #[prost(bytes = "vec", tag = "7")]
+    pub icon_sha256: Vec<u8>,
+    #[prost(int64, tag = "8")]
+    pub not_before_unix: i64,
+    #[prost(int64, tag = "9")]
+    pub expires_at_unix: i64,
+    #[prost(string, tag = "10")]
+    pub hero_relative_path: String,
+    #[prost(bytes = "vec", tag = "11")]
+    pub hero_sha256: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+pub struct SignedBrandingManifestV1 {
     #[prost(bytes = "vec", tag = "1")]
     pub claims: Vec<u8>,
     #[prost(bytes = "vec", tag = "2")]
@@ -546,6 +603,46 @@ pub fn verify_game_registration(
     validate_game_registration(&claims, now_unix)?;
     verify_signed_bytes(
         REGISTRATION_DOMAIN,
+        &signed.claims,
+        &signed.signature,
+        keys.resolve(&signed.key_id, now_unix)?,
+    )?;
+    Ok(claims)
+}
+
+pub fn verify_branding_manifest(
+    signed: &SignedBrandingManifestV1,
+    keys: &VerificationKeyRing,
+    now_unix: i64,
+) -> Result<BrandingManifestClaimsV1, ProtocolError> {
+    let claims: BrandingManifestClaimsV1 = decode_canonical(&signed.claims)?;
+    if claims.protocol_version != PROTOCOL_VERSION
+        || !identifier(&claims.registration_id)
+        || !identifier(&claims.game_id)
+        || !safe_display(&claims.display_name, 96)
+        || !safe_display(&claims.publisher_name, 128)
+        || !safe_relative_path(&claims.icon_relative_path)
+        || !claims
+            .icon_relative_path
+            .to_ascii_lowercase()
+            .ends_with(".png")
+        || claims.icon_sha256.len() != 32
+        || claims.hero_relative_path.is_empty() != claims.hero_sha256.is_empty()
+        || (!claims.hero_relative_path.is_empty()
+            && (!safe_relative_path(&claims.hero_relative_path)
+                || !claims
+                    .hero_relative_path
+                    .to_ascii_lowercase()
+                    .ends_with(".png")
+                || claims.hero_sha256.len() != 32))
+        || claims.not_before_unix > now_unix + 30
+        || claims.expires_at_unix <= now_unix
+        || claims.expires_at_unix <= claims.not_before_unix
+    {
+        return Err(ProtocolError::InvalidField("branding_manifest"));
+    }
+    verify_signed_bytes(
+        BRANDING_DOMAIN,
         &signed.claims,
         &signed.signature,
         keys.resolve(&signed.key_id, now_unix)?,
@@ -975,7 +1072,45 @@ fn validate_game_registration(
     {
         return Err(ProtocolError::InvalidField("game_registration"));
     }
+    if claims.registered_files.len() > 4096 {
+        return Err(ProtocolError::InvalidField("registered_files"));
+    }
+    let mut registered_paths = std::collections::HashSet::new();
+    for file in &claims.registered_files {
+        if !safe_relative_path(&file.relative_path)
+            || file.sha256.len() != 32
+            || !registered_paths.insert(file.relative_path.replace('\\', "/").to_ascii_lowercase())
+        {
+            return Err(ProtocolError::InvalidField("registered_files"));
+        }
+    }
+    if (!claims.repair_executable_relative_path.is_empty()
+        && (!safe_relative_path(&claims.repair_executable_relative_path)
+            || !registered_paths.contains(
+                &claims
+                    .repair_executable_relative_path
+                    .replace('\\', "/")
+                    .to_ascii_lowercase(),
+            )))
+        || (claims.repair_executable_relative_path.is_empty()
+            && !claims.repair_arguments.is_empty())
+        || !safe_arguments(&claims.repair_arguments)
+        || !safe_arguments(&claims.offline_arguments)
+        || (!claims.offline_play_allowed && !claims.offline_arguments.is_empty())
+    {
+        return Err(ProtocolError::InvalidField("launch_recovery"));
+    }
     Ok(())
+}
+
+fn safe_arguments(values: &[String]) -> bool {
+    values.len() <= 32
+        && values.iter().map(String::len).sum::<usize>() <= 4096
+        && values.iter().all(|value| {
+            !value.is_empty()
+                && value.len() <= 512
+                && !value.chars().any(|character| character.is_control())
+        })
 }
 
 fn safe_relative_path(value: &str) -> bool {
@@ -987,6 +1122,18 @@ fn safe_relative_path(value: &str) -> bool {
         && value
             .split(['/', '\\'])
             .all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn safe_display(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.trim() == value
+        && value.chars().count() <= maximum
+        && !value.chars().any(|character| {
+            character.is_control()
+                || matches!(character,
+                    '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}')
+        })
 }
 
 fn https_url(value: &str) -> bool {
@@ -1122,6 +1269,55 @@ mod tests {
         assert_eq!(
             sign_report(value, &key),
             Err(ProtocolError::InvalidField("challenge_nonce"))
+        );
+    }
+
+    #[test]
+    fn signed_branding_is_bound_and_rejects_unsafe_display_text() {
+        let key = SigningKey::generate(&mut OsRng);
+        let claims = BrandingManifestClaimsV1 {
+            protocol_version: PROTOCOL_VERSION,
+            registration_id: "sample-production".into(),
+            game_id: "sample-game".into(),
+            display_name: "Sample Game".into(),
+            publisher_name: "Sample Publisher".into(),
+            icon_relative_path: "icons/launch.png".into(),
+            icon_sha256: vec![7; 32],
+            not_before_unix: 1_699_999_900,
+            expires_at_unix: 1_700_003_600,
+            hero_relative_path: String::new(),
+            hero_sha256: vec![],
+        };
+        let claim_bytes = claims.encode_to_vec();
+        let signed = SignedBrandingManifestV1 {
+            claims: claim_bytes.clone(),
+            signature: key
+                .sign(&[BRANDING_DOMAIN, &claim_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            key_id: "root-1".into(),
+        };
+        assert_eq!(
+            verify_branding_manifest(&signed, &key_ring(&key), 1_700_000_000)
+                .unwrap()
+                .display_name,
+            "Sample Game"
+        );
+
+        let mut unsafe_claims = claims;
+        unsafe_claims.display_name = "Safe\u{202e}gnp.exe".into();
+        let unsafe_bytes = unsafe_claims.encode_to_vec();
+        let unsafe_signed = SignedBrandingManifestV1 {
+            claims: unsafe_bytes.clone(),
+            signature: key
+                .sign(&[BRANDING_DOMAIN, &unsafe_bytes].concat())
+                .to_bytes()
+                .to_vec(),
+            key_id: "root-1".into(),
+        };
+        assert_eq!(
+            verify_branding_manifest(&unsafe_signed, &key_ring(&key), 1_700_000_000),
+            Err(ProtocolError::InvalidField("branding_manifest"))
         );
     }
 

@@ -16,6 +16,12 @@ pub struct RuntimeStatus {
     pub state: String,
     pub public_reason: Option<String>,
     pub updated_at_unix: i64,
+    #[serde(default)]
+    pub launch_attempt_id: Option<String>,
+    #[serde(default)]
+    pub milestone_index: Option<u32>,
+    #[serde(default)]
+    pub milestone_total: Option<u32>,
 }
 
 pub fn path(registration_id: &str) -> Result<PathBuf> {
@@ -76,7 +82,7 @@ pub fn read(path: &Path) -> Result<RuntimeStatus> {
         bail!("Agent status file is invalid");
     }
     let value: RuntimeStatus = serde_json::from_slice(&std::fs::read(path)?)?;
-    if value.format_version != 1 {
+    if !matches!(value.format_version, 1 | 2) {
         bail!("Agent status version is unsupported");
     }
     Ok(value)

@@ -33,12 +33,14 @@ pub struct RuntimeState {
     pub automatic_update: Option<AutomaticUpdateBinding>,
 }
 
+#[derive(Clone)]
 pub struct RegistrationBinding {
     pub registration_id: String,
     pub tenant_id: String,
     pub game_id: String,
     pub environment_id: String,
     pub status_path: PathBuf,
+    pub launch_attempt_id: String,
 }
 
 pub struct AutomaticUpdateBinding {
@@ -66,7 +68,7 @@ pub fn serve(
         },
     )
     .context("failed to send Agent hello")?;
-    publish_runtime(state, "awaiting_admission", None);
+    publish_runtime(state, "awaiting_server_admission", None);
     let (frames, incoming) = mpsc::sync_channel(1);
     thread::Builder::new()
         .name("certael-agent-ipc".into())
@@ -81,6 +83,11 @@ pub fn serve(
     let bootstrap = match incoming.recv_timeout(Duration::from_secs(15)) {
         Ok(Ok(frame)) => frame,
         Ok(Err(error)) => {
+            publish_runtime(
+                state,
+                "launch_failed",
+                Some("AGENT_ADMISSION_CHANNEL_FAILED"),
+            );
             let _ = write_health(
                 &mut writer,
                 "unbound",
@@ -91,6 +98,7 @@ pub fn serve(
             return Err(error).context("protected game channel failed before Agent admission");
         }
         Err(RecvTimeoutError::Timeout) => {
+            publish_runtime(state, "launch_failed", Some("AGENT_ADMISSION_TIMEOUT"));
             let _ = write_health(
                 &mut writer,
                 "unbound",
@@ -101,6 +109,11 @@ pub fn serve(
             bail!("protected game did not provide Agent admission in time");
         }
         Err(RecvTimeoutError::Disconnected) => {
+            publish_runtime(
+                state,
+                "launch_failed",
+                Some("AGENT_ADMISSION_CHANNEL_CLOSED"),
+            );
             let _ = write_health(
                 &mut writer,
                 "unbound",
@@ -119,6 +132,7 @@ pub fn serve(
         bootstrap.payload.len()
     );
     if bootstrap.message_type != MessageType::LaunchGrant {
+        publish_runtime(state, "launch_failed", Some("AGENT_ADMISSION_TYPE_INVALID"));
         let _ = write_health(
             &mut writer,
             "unbound",
@@ -128,6 +142,7 @@ pub fn serve(
         );
         bail!("protected game did not provide a signed Agent launch bundle");
     }
+    publish_runtime(state, "verifying_signed_launch_bundle", None);
     let public_key = state.key.verifying_key().to_bytes();
     let launch = match verify_launch_bundle(
         &bootstrap.payload,
@@ -148,7 +163,11 @@ pub fn serve(
                 &["AGENT_UPDATE_REQUIRED"],
             );
             if let Some(update) = &state.automatic_update {
-                publish_runtime(state, "updating", Some("AGENT_UPDATE_REQUIRED"));
+                publish_runtime(
+                    state,
+                    "installing_required_update",
+                    Some("AGENT_UPDATE_REQUIRED"),
+                );
                 let runtime = tokio::runtime::Runtime::new()
                     .context("cannot start automatic Agent updater")?;
                 match runtime.block_on(verify_stage_and_install_automatic(
@@ -176,6 +195,7 @@ pub fn serve(
             bail!("Agent update is required before protected launch");
         }
         Err(error) => {
+            publish_runtime(state, "launch_failed", Some("AGENT_LAUNCH_BUNDLE_REJECTED"));
             let _ = write_health(
                 &mut writer,
                 "unbound",
@@ -191,6 +211,7 @@ pub fn serve(
             || registration.game_id != launch.game_id
             || registration.environment_id != launch.environment_id
     }) {
+        publish_runtime(state, "launch_failed", Some("AGENT_REGISTRATION_MISMATCH"));
         let _ = write_health(
             &mut writer,
             &launch.session_id,
@@ -216,6 +237,11 @@ pub fn serve(
     let mismatches = match verify_files(&state.game_root, &manifest) {
         Ok(mismatches) => mismatches,
         Err(error) => {
+            publish_runtime(
+                state,
+                "launch_failed",
+                Some("AGENT_MANIFEST_VERIFICATION_FAILED"),
+            );
             let _ = write_health(
                 &mut writer,
                 &launch.session_id,
@@ -227,6 +253,7 @@ pub fn serve(
         }
     };
     if !mismatches.is_empty() {
+        publish_runtime(state, "launch_failed", Some("AGENT_BUILD_MISMATCH"));
         let _ = write_health(
             &mut writer,
             &launch.session_id,
@@ -449,21 +476,50 @@ pub fn serve(
     }
 }
 
-fn publish_runtime(state: &RuntimeState, runtime_state: &str, reason: Option<&str>) {
+pub(crate) fn publish_runtime(state: &RuntimeState, runtime_state: &str, reason: Option<&str>) {
     let Some(registration) = &state.registration else {
         return;
     };
+    publish_binding(registration, runtime_state, reason);
+}
+
+pub(crate) fn publish_binding(
+    registration: &RegistrationBinding,
+    runtime_state: &str,
+    reason: Option<&str>,
+) {
     let _ = crate::status::publish(
         &registration.status_path,
         &crate::status::RuntimeStatus {
-            format_version: 1,
+            format_version: 2,
             registration_id: registration.registration_id.clone(),
             game_id: registration.game_id.clone(),
             state: runtime_state.to_owned(),
             public_reason: reason.map(str::to_owned),
             updated_at_unix: now_unix().unwrap_or(0),
+            launch_attempt_id: Some(registration.launch_attempt_id.clone()),
+            milestone_index: milestone_index(runtime_state),
+            milestone_total: Some(8),
         },
     );
+}
+
+fn milestone_index(runtime_state: &str) -> Option<u32> {
+    match runtime_state {
+        "verifying_agent_version" => Some(1),
+        "loading_signed_registration" => Some(2),
+        "checking_required_update"
+        | "installing_required_update"
+        | "update_required"
+        | "update_ready"
+        | "update_failed" => Some(3),
+        "hashing_registered_game_files" => Some(4),
+        "starting_game" => Some(5),
+        "awaiting_server_admission" => Some(6),
+        "verifying_signed_launch_bundle" => Some(7),
+        "protected" => Some(8),
+        _ => None,
+    }
 }
 
 fn write_health(

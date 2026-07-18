@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-07-18T08:30:00Z",
+  "title": "Design System: Certael Agent",
+  "extensions": {
+    "colorMeta": {
+      "canvas": { "role": "neutral", "displayName": "Checkpoint Canvas", "canonical": "#0B121B", "tonalRamp": ["#05090D", "#0B121B", "#111C28", "#182534", "#2A3A4C", "#50647A", "#A8B5C4", "#F4F7FA"] },
+      "assurance": { "role": "primary", "displayName": "Calm Assurance", "canonical": "#58C7D4", "tonalRamp": ["#081E22", "#10383F", "#1B555E", "#287680", "#3798A4", "#58C7D4", "#9BE8EF", "#E5FCFE"] },
+      "recovery": { "role": "secondary", "displayName": "Recovery Coral", "canonical": "#FFB4A9", "tonalRamp": ["#2C0B08", "#55201A", "#7E3A31", "#A9584D", "#D27E72", "#FFB4A9", "#FFD9D4", "#FFF1EF"] }
+    },
+    "typographyMeta": {
+      "headline": { "displayName": "Outcome headline", "purpose": "Failure outcomes only." },
+      "title": { "displayName": "Launch title", "purpose": "Verified game identity and active runtime state." },
+      "body": { "displayName": "Explanation", "purpose": "Plain-language authority and recovery copy." },
+      "label": { "displayName": "Milestone label", "purpose": "Progress rail, publisher, buttons, and footer." }
+    },
+    "shadows": [],
+    "motion": [
+      { "name": "state-poll", "value": "100ms", "purpose": "Reflect authoritative runtime state without decorative animation." },
+      { "name": "success-dismiss", "value": "1200ms", "purpose": "Keep verified success readable briefly, then leave the player's way." }
+    ],
+    "breakpoints": [
+      { "name": "minimum-window", "value": "720x560" },
+      { "name": "cinematic-default", "value": "1040x800" },
+      { "name": "large-text-disclosure", "value": "hide hero below 420 logical px remaining" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Recovery Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Starts only the repair executable bound by the signed game registration.",
+      "html": "<button class=\"ds-btn-primary\">Repair game files</button>",
+      "css": ".ds-btn-primary { background:#286873; color:#F4F7FA; min-height:46px; padding:11px 18px; border:2px solid #78DCE6; border-radius:3px; font:600 14px system-ui,sans-serif; } .ds-btn-primary:hover,.ds-btn-primary:focus-visible { background:#347A85; outline:2px solid #78DCE6; outline-offset:2px; } .ds-btn-primary:active { background:#205B65; }"
+    },
+    {
+      "name": "Secondary Recovery Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Used for signed offline-play permission and close.",
+      "html": "<button class=\"ds-btn-secondary\">Play offline</button>",
+      "css": ".ds-btn-secondary { background:#182534; color:#F4F7FA; min-height:46px; padding:11px 18px; border:1px solid #2A3A4C; border-radius:3px; font:400 14px system-ui,sans-serif; } .ds-btn-secondary:hover,.ds-btn-secondary:focus-visible { background:#286873; border-color:#78DCE6; outline:2px solid #78DCE6; outline-offset:2px; } .ds-btn-secondary:active { background:#205B65; }"
+    },
+    {
+      "name": "Launch Progress Rail",
+      "kind": "custom",
+      "description": "A three-stage truthful sequence; symbols and labels carry meaning beyond color.",
+      "html": "<ol class=\"ds-rail\"><li class=\"ds-complete\">✓<span>Checks</span></li><li class=\"ds-active\">●<span>Launching protected mode</span></li><li>○<span>Protected session</span></li></ol>",
+      "css": ".ds-rail { display:flex; justify-content:space-between; align-items:start; list-style:none; margin:0; padding:0; color:#7D8C9E; font:400 13px system-ui,sans-serif; } .ds-rail li { display:grid; justify-items:center; gap:8px; min-width:120px; } .ds-rail li::first-line { font-size:24px; } .ds-rail .ds-complete { color:#58C7D4; } .ds-rail .ds-active { color:#F4F7FA; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Checkpoint",
+    "overview": "Certael Agent is a wide native launch window that lets verified game identity and signed publisher artwork carry the opening moment. Beneath that artwork, a three-stage rail tells the truth about checks, launch, and authoritative server admission.",
+    "keyCharacteristics": ["Full-width publisher-signed artwork", "One truthful three-stage rail", "Dark restrained palette", "Plain-language runtime states", "Native accessibility and 200% reflow"],
+    "rules": [
+      { "name": "The One Signal Rule", "body": "Assurance cyan appears only on active, completed, focused, or successful elements.", "section": "colors" },
+      { "name": "The Meaning Beyond Color Rule", "body": "Every state also has position, text, and a distinct symbol.", "section": "colors" },
+      { "name": "The Plain Language Rule", "body": "Player-facing copy states what is happening and who confirms it.", "section": "typography" },
+      { "name": "The Single Window Rule", "body": "Never place cards, glass panels, or modal surfaces inside the launch splash.", "section": "elevation" }
+    ],
+    "dos": ["Do keep game identity, current milestone, and authority boundary visible in one scan.", "Do use only signed, digest-verified local PNG assets for publisher branding.", "Do remove decorative artwork before allowing text to clip at large OS text scales."],
+    "donts": ["Don't use neon security theater, alarm-heavy red dashboards, or unexplained risk graphics.", "Don't show fake percentages, simulated progress, or a premature Protected claim.", "Don't use glassmorphism, generic card grids, or marketing-page composition.", "Don't communicate success, failure, or progress by color alone."]
+  }
+}

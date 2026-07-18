@@ -23,6 +23,8 @@ struct StoredRegistration {
     format_version: u32,
     signed_registration_base64: String,
     game_root: String,
+    #[serde(default)]
+    signed_branding_base64: Option<String>,
 }
 
 pub struct RegisteredGame {
@@ -33,6 +35,7 @@ pub struct RegisteredGame {
     pub update_root: PathBuf,
     pub state_root: PathBuf,
     pub status_path: PathBuf,
+    pub branding: Option<crate::branding::VerifiedBranding>,
 }
 
 pub fn default_root() -> PathBuf {
@@ -53,15 +56,19 @@ pub fn register(
     publisher_trust_store: &Path,
     update_root: &Path,
     game_root: &Path,
+    branding_manifest: Option<&Path>,
+    branding_root: Option<&Path>,
 ) -> Result<GameRegistrationClaimsV1> {
-    install_registration(
+    install_registration(InstallRegistrationArgs {
         registry_root,
         signed_registration,
         publisher_trust_store,
         update_root,
         game_root,
-        false,
-    )
+        branding_manifest,
+        branding_root,
+        replace: false,
+    })
 }
 
 pub fn update(
@@ -70,25 +77,43 @@ pub fn update(
     publisher_trust_store: &Path,
     update_root: &Path,
     game_root: &Path,
+    branding_manifest: Option<&Path>,
+    branding_root: Option<&Path>,
 ) -> Result<GameRegistrationClaimsV1> {
-    install_registration(
+    install_registration(InstallRegistrationArgs {
         registry_root,
         signed_registration,
         publisher_trust_store,
         update_root,
         game_root,
-        true,
-    )
+        branding_manifest,
+        branding_root,
+        replace: true,
+    })
 }
 
-fn install_registration(
-    registry_root: &Path,
-    signed_registration: &Path,
-    publisher_trust_store: &Path,
-    update_root: &Path,
-    game_root: &Path,
+struct InstallRegistrationArgs<'a> {
+    registry_root: &'a Path,
+    signed_registration: &'a Path,
+    publisher_trust_store: &'a Path,
+    update_root: &'a Path,
+    game_root: &'a Path,
+    branding_manifest: Option<&'a Path>,
+    branding_root: Option<&'a Path>,
     replace: bool,
-) -> Result<GameRegistrationClaimsV1> {
+}
+
+fn install_registration(args: InstallRegistrationArgs<'_>) -> Result<GameRegistrationClaimsV1> {
+    let InstallRegistrationArgs {
+        registry_root,
+        signed_registration,
+        publisher_trust_store,
+        update_root,
+        game_root,
+        branding_manifest,
+        branding_root,
+        replace,
+    } = args;
     let registration_bytes = read_regular(signed_registration, MAX_REGISTRATION_BYTES)
         .context("signed game registration is invalid")?;
     let signed = SignedGameRegistrationV1::decode(registration_bytes.as_slice())
@@ -121,6 +146,18 @@ fn install_registration(
     if !canonical_game.starts_with(&game_root) || !canonical_game.is_file() {
         bail!("registered executable escapes the game installation root");
     }
+    let branding = match (branding_manifest, branding_root) {
+        (Some(manifest), Some(root)) => Some(crate::branding::verify_install(
+            manifest,
+            root,
+            &keys,
+            &claims.registration_id,
+            &claims.game_id,
+            now_unix()?,
+        )?),
+        (None, None) => None,
+        _ => bail!("branding manifest and branding root must be supplied together"),
+    };
 
     std::fs::create_dir_all(registry_root).context("cannot create Agent game registry")?;
     let destination = registry_root.join(&claims.registration_id);
@@ -142,14 +179,24 @@ fn install_registration(
         write_new(&temporary.join("trust-store.json"), &trust_bytes)?;
         write_new(&temporary.join("update-root.json"), &update_bytes)?;
         let record = StoredRegistration {
-            format_version: 1,
+            format_version: 2,
             signed_registration_base64: BASE64.encode(&registration_bytes),
             game_root: game_root.to_string_lossy().into_owned(),
+            signed_branding_base64: branding
+                .as_ref()
+                .map(|value| BASE64.encode(value.signed.encode_to_vec())),
         };
         write_new(
             &temporary.join("registration.json"),
             &serde_json::to_vec(&record)?,
         )?;
+        if let Some(branding) = &branding {
+            std::fs::create_dir(temporary.join("branding"))?;
+            write_new(&temporary.join("branding").join("icon.png"), &branding.icon)?;
+            if let Some(hero) = &branding.hero {
+                write_new(&temporary.join("branding").join("hero.png"), hero)?;
+            }
+        }
         if replace {
             std::fs::rename(&destination, &backup)
                 .context("cannot stage existing game registration")?;
@@ -194,7 +241,7 @@ pub fn load(registry_root: &Path, registration_id: &str) -> Result<RegisteredGam
     .context("registered game metadata is unavailable")?;
     let record: StoredRegistration =
         serde_json::from_slice(&record_bytes).context("registered game metadata is invalid")?;
-    if record.format_version != 1 {
+    if !matches!(record.format_version, 1 | 2) {
         bail!("registered game metadata version is unsupported");
     }
     let signed_bytes = BASE64
@@ -209,7 +256,8 @@ pub fn load(registry_root: &Path, registration_id: &str) -> Result<RegisteredGam
     let update_root = state_root.join("update-root.json");
     let trust_bytes = read_regular(&trust_store, MAX_ROOT_BYTES)?;
     let update_bytes = read_regular(&update_root, MAX_ROOT_BYTES)?;
-    let claims = verify_game_registration(&signed, &trust::load(&trust_store)?, now_unix()?)
+    let keys = trust::load(&trust_store)?;
+    let claims = verify_game_registration(&signed, &keys, now_unix()?)
         .context("registered game is expired or revoked")?;
     if claims.registration_id != registration_id
         || Sha256::digest(&trust_bytes).as_slice() != claims.trust_store_sha256
@@ -226,6 +274,24 @@ pub fn load(registry_root: &Path, registration_id: &str) -> Result<RegisteredGam
     if !game.starts_with(&game_root) || !game.is_file() {
         bail!("registered game executable is unsafe");
     }
+    let branding = record
+        .signed_branding_base64
+        .as_deref()
+        .map(|encoded| -> Result<_> {
+            let signed = BASE64
+                .decode(encoded)
+                .context("registered branding signature is invalid")?;
+            crate::branding::verify_stored(
+                &signed,
+                &state_root.join("branding").join("icon.png"),
+                &state_root.join("branding").join("hero.png"),
+                &keys,
+                &claims.registration_id,
+                &claims.game_id,
+                now_unix()?,
+            )
+        })
+        .transpose()?;
     Ok(RegisteredGame {
         claims,
         game,
@@ -234,6 +300,7 @@ pub fn load(registry_root: &Path, registration_id: &str) -> Result<RegisteredGam
         update_root,
         state_root,
         status_path: crate::status::path(registration_id)?,
+        branding,
     })
 }
 
@@ -348,6 +415,11 @@ mod tests {
             update_channel: "stable".into(),
             not_before_unix: now - 1,
             expires_at_unix: now + 3600,
+            registered_files: vec![],
+            repair_executable_relative_path: String::new(),
+            repair_arguments: vec![],
+            offline_play_allowed: false,
+            offline_arguments: vec![],
         };
         let claim_bytes = claims.encode_to_vec();
         let signed = SignedGameRegistrationV1 {
@@ -366,6 +438,8 @@ mod tests {
             &trust_path,
             &update_path,
             &game_root,
+            None,
+            None,
         )
         .unwrap();
         assert_eq!(registered.registration_id, "sample-production");
@@ -375,6 +449,8 @@ mod tests {
             &trust_path,
             &update_path,
             &game_root,
+            None,
+            None,
         )
         .unwrap();
         let loaded = load(&registry_root, "sample-production").unwrap();

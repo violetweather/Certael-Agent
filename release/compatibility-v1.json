@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "product": "certael-agent",
-  "product_version": "0.3.0-alpha.3",
+  "product_version": "0.4.0-alpha.1",
   "stability": "pre-1.0",
   "agent_protocol_version": 1,
   "local_ipc_version": 1,
@@ -24,6 +24,8 @@
     "Launch-bundle validation distinguishes empty messages from oversized messages and identifies the failing component.",
     "Admission failures return a structured health state and public reason before the protected channel closes.",
     "Admission diagnostics correlate Agent PID, game PID, build ID, session ID, and frame length without logging signed payloads.",
+    "Runtime status schema v2 correlates launch milestones to a unique launch attempt and ignores stale status files.",
+    "Signed local branding, registered-file verification, repair, and offline controls are supported by the native launch splash.",
     "The Agent is optional user-mode evidence and does not make an untrusted client authoritative."
   ]
 }

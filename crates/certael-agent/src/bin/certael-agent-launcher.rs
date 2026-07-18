@@ -19,15 +19,21 @@ fn main() -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let error = Command::new(target)
+        let error = Command::new(&target)
             .args(std::env::args_os().skip(1))
+            .env("CERTAEL_AGENT_LAUNCHER_VERIFIED", "1")
+            .env("CERTAEL_AGENT_SELECTED_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("CERTAEL_AGENT_SELECTED_TARGET", &target)
             .exec();
         Err(error).context("failed to execute the active Certael Agent")
     }
     #[cfg(windows)]
     {
-        let status = Command::new(target)
+        let status = Command::new(&target)
             .args(std::env::args_os().skip(1))
+            .env("CERTAEL_AGENT_LAUNCHER_VERIFIED", "1")
+            .env("CERTAEL_AGENT_SELECTED_VERSION", env!("CARGO_PKG_VERSION"))
+            .env("CERTAEL_AGENT_SELECTED_TARGET", &target)
             .status()
             .context("failed to execute the active Certael Agent")?;
         std::process::exit(status.code().unwrap_or(1));

@@ -50,7 +50,7 @@ The Agent CLI can independently verify the Core-compatible binary manifest:
 certael-agent compatibility-check \
   --manifest compatibility.pb \
   --trust-store compatibility-trust-store.json \
-  --product agent --version 0.3.0-alpha.3 --protocol 1
+  --product agent --version 0.4.0-alpha.1 --protocol 1
 ```
 
 The compatibility key is a dedicated offline release key. A game publisher's

@@ -59,6 +59,12 @@ arguments. The registration ID must remain the same. Interrupted replacement
 is recovered on the next registration operation; incomplete trust bindings fail
 closed.
 
+Publishers can add a signed local icon and optional cinematic hero image with
+`--branding-manifest` and `--branding-root`. The arguments must be supplied
+together. See [the publisher launch splash guide](LAUNCH-SPLASH.md) for the
+manifest fields, asset checks, registered-file hashing, repair, and offline-play
+controls.
+
 ## Launch a protected game
 
 ```bash
